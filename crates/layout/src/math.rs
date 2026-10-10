@@ -1537,6 +1537,14 @@ impl EqLayout {
         Some(Rect::new(x, g.top, x, g.bottom))
     }
 
+    /// The box of the whole row at `path` (the active slot's highlight); `None` when the row was
+    /// not laid out.
+    pub fn row_rect(&self, path: &[(usize, usize)]) -> Option<Rect> {
+        let g = self.row(path)?;
+        let (x0, x1) = (g.xs.first().copied()?, g.xs.last().copied()?);
+        Some(Rect::new(x0.min(x1), g.top, x0.max(x1), g.bottom))
+    }
+
     /// The rectangle covering units `a..b` of the row at `path`.
     pub fn span_rect(&self, path: &[(usize, usize)], a: usize, b: usize) -> Option<Rect> {
         let g = self.row(path)?;

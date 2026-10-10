@@ -194,6 +194,32 @@ pub fn render_region(doc: &Document, page: &Page, w: u32, h: u32, view: Affine, 
     Rendered { width: w16 as u32, height: h16 as u32, pixels }
 }
 
+/// Render an equation laid out by [`wordcraft_layout::math::layout_equation`] on white (the
+/// equation editor's canvas); `scale` is pixels per point.
+pub fn render_eq(l: &wordcraft_layout::math::EqLayout, scale: f64) -> Rendered {
+    let scale = if scale.is_finite() { scale.clamp(0.1, 16.0) } else { 1.0 };
+    let w = (l.width * scale).ceil().clamp(1.0, MAX_SIDE as f64) as u16;
+    let h = (l.height * scale).ceil().clamp(1.0, MAX_SIDE as f64) as u16;
+    let mut ctx = RenderContext::new_with(w, h, vello_cpu::RenderSettings { num_threads: 0, ..Default::default() });
+    ctx.set_transform(Affine::IDENTITY);
+    ctx.set_paint(color(Rgb::WHITE, 1.0));
+    ctx.fill_rect(&kurbo::Rect::new(0.0, 0.0, w as f64, h as f64));
+    let view = Affine::scale(scale);
+    let visible = kurbo::Rect::new(-1e6, -1e6, 1e6, 1e6);
+    let doc = Document::default();
+    let opts = RenderOptions::default();
+    for d in &l.draws {
+        draw(&mut ctx, &doc, d, view, &visible, &opts);
+    }
+    ctx.flush();
+    let mut pixels = vec![0u8; w as usize * h as usize * 4];
+    let mut res = Resources::new();
+    if let Some(pm) = vello_cpu::PixmapMut::new(w, h, &mut pixels) {
+        ctx.render(pm, &mut res);
+    }
+    Rendered { width: w as u32, height: h as u32, pixels }
+}
+
 fn draw_watermark(ctx: &mut RenderContext, view: Affine, page: &Page, wm: &wordcraft_doc::Watermark) {
     let r = wordcraft_fonts::word::resolve(&wm.font, false, false);
     let face = r.face;

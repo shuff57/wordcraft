@@ -456,6 +456,30 @@ pub fn page_at(rects: &[Rect], scale: f32, p: Pos2) -> Option<(usize, f32, f32)>
     Some((i, (p.x - r.min.x) / scale, (p.y - r.min.y) / scale))
 }
 
+/// The equation under the click at page point (x, y), given the caret position the click hit:
+/// the object just after or just before it, if it is an equation whose box holds the point.
+fn equation_under(app: &WordApp, layout: &DocLayout, page: usize, x: f32, y: f32, pos: &wordcraft_doc::Pos) -> Option<wordcraft_doc::Pos> {
+    use wordcraft_doc::para::{InlineObject, OBJ};
+    let para = app.session.doc.para(pos.story, &pos.path)?;
+    let candidates = [Some(pos.off), pos.off.checked_sub(OBJ.len_utf8())];
+    for off in candidates.into_iter().flatten() {
+        if !matches!(para.object_at(off), Some(InlineObject::Equation { .. })) {
+            continue;
+        }
+        let at = |o: usize| layout.caret(&wordcraft_doc::Pos { off: o, ..pos.clone() });
+        if let (Some(c0), Some(c1)) = (at(off), at(off + OBJ.len_utf8()))
+            && c0.page == page
+            && c1.page == page
+            && (c0.top - c1.top).abs() < 1.0
+            && !(x >= c0.x - 2.0 && x <= c1.x + 2.0 && y >= c0.top - 6.0 && y <= c0.top + c0.height + 6.0)
+        {
+            continue;
+        }
+        return Some(wordcraft_doc::Pos { off, ..pos.clone() });
+    }
+    None
+}
+
 fn mouse(app: &mut WordApp, ui: &Ui, resp: &egui::Response, rects: &[Rect], layout: &DocLayout, scale: f32) {
     let Some(p) = resp.interact_pointer_pos().or_else(|| resp.hover_pos()) else { return };
     let Some((page, x, y)) = page_at(rects, scale, p) else { return };
@@ -479,6 +503,16 @@ fn mouse(app: &mut WordApp, ui: &Ui, resp: &egui::Response, rects: &[Rect], layo
             if let Some(pos) = layout.hit(page, x, y, StoryRef::Body) {
                 app.session.sel = wordcraft_engine::Selection::caret(pos);
             }
+            return;
+        }
+        if let Some(pos) = layout.hit(page, x, y, story)
+            && let Some(eq) = equation_under(app, layout, page, x, y, &pos)
+        {
+            // Double-click on an equation selects it and opens the equation editor on it.
+            let end = wordcraft_doc::Pos { off: eq.off + wordcraft_doc::para::OBJ.len_utf8(), ..eq.clone() };
+            app.session.sel = wordcraft_engine::Selection { anchor: eq.clone(), focus: end };
+            let at = serde_json::to_value(&eq).ok();
+            app.dialog = Some(crate::dialogs::Dialog::equation(app, at));
             return;
         }
         let _ = app.run("select.word", json!({}));

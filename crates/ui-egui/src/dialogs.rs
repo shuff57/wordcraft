@@ -102,6 +102,12 @@ pub enum Dialog {
     About {
         tab: u8,
     },
+    /// The equation editor; `Insert` or `Update` (an equation at the caret) end in
+    /// `insert.equation` / `equation.update`.
+    Equation {
+        #[serde(skip)]
+        st: Box<crate::eqdialog::EqState>,
+    },
 }
 
 impl Dialog {
@@ -123,6 +129,7 @@ impl Dialog {
             Dialog::ModifyStyle { .. } => "modifyStyle",
             Dialog::Commands { .. } => "commands",
             Dialog::About { .. } => "about",
+            Dialog::Equation { .. } => "equation",
         }
     }
 
@@ -195,11 +202,20 @@ impl Dialog {
             "watermark" => Dialog::Watermark { text: "CONFIDENTIAL".into(), diagonal: true },
             "newStyle" => Dialog::NewStyle { name: "Style1".into(), based_on: "Normal".into() },
             "commands" => Dialog::Commands { query: String::new() },
+            "equation" => {
+                let pos = equation_at_selection(app);
+                Dialog::equation(app, pos)
+            }
             "about" => Dialog::About { tab: 0 },
             "contributors" => Dialog::About { tab: 1 },
             "models" => Dialog::About { tab: 2 },
             _ => return None,
         })
+    }
+
+    /// Opens the equation editor on the equation at `pos` (a position, as `equation.get` reports it), or on a blank one when it is `None`.
+    pub fn equation(app: &mut WordApp, pos: Option<Value>) -> Dialog {
+        Dialog::Equation { st: Box::new(crate::eqdialog::EqState::load(&mut app.session, pos)) }
     }
 
     pub fn modify_style(app: &WordApp, id: &str) -> Option<Dialog> {
@@ -230,6 +246,24 @@ impl Dialog {
 }
 
 /// Grid picker for Insert › Table (hover to size, click to insert).
+/// The position of the equation the selection is on: the one selected, or the one right before
+/// or after a collapsed caret. `None` opens the editor on a new equation.
+pub(crate) fn equation_at_selection(app: &WordApp) -> Option<Value> {
+    use wordcraft_doc::para::{InlineObject, OBJ};
+    let (a, b) = app.session.sel.ordered();
+    let para = app.session.doc.para(a.story, &a.path)?;
+    let is_eq = |off: usize| matches!(para.object_at(off), Some(InlineObject::Equation { .. }));
+    let off = if a == b {
+        let before = a.off.checked_sub(OBJ.len_utf8()).filter(|o| is_eq(*o));
+        if is_eq(a.off) { Some(a.off) } else { before }
+    } else if a.path == b.path {
+        para.object_offsets().into_iter().find(|o| *o >= a.off && *o < b.off && is_eq(*o))
+    } else {
+        None
+    }?;
+    serde_json::to_value(wordcraft_doc::Pos { story: a.story, path: a.path.clone(), off }).ok()
+}
+
 pub fn table_grid_picker(ui: &mut Ui, app: &mut WordApp) {
     let t = Tokens::get(ui.ctx());
     let id = egui::Id::new("table_picker_hover");
@@ -287,6 +321,8 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context) {
         Dialog::ModifyStyle { .. } => "Modify Style",
         Dialog::Commands { .. } => "Search Commands",
         Dialog::About { .. } => "About WordCraft",
+        Dialog::Equation { st } if st.is_edit() => "Edit Equation",
+        Dialog::Equation { .. } => "Equation",
     };
     egui::Window::new(tl!(title))
         .id(egui::Id::new(("dialog", title)))
@@ -325,6 +361,7 @@ fn buttons(ui: &mut Ui, ok: &str) -> (bool, bool) {
 /// Returns true to close.
 fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
     match d {
+        Dialog::Equation { st } => crate::eqdialog::body(app, ui, st),
         Dialog::Font { font, size, bold, italic, underline, strike, sup, sub, small_caps, caps, hidden, color, spacing } => {
             egui::Grid::new("fontdlg").num_columns(2).spacing(vec2(10.0, 6.0)).show(ui, |ui| {
                 ui.label(tl!("Font:"));

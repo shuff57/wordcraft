@@ -5028,6 +5028,7 @@ dependencies = [
  "egui",
  "egui_kittest",
  "image",
+ "kurbo",
  "log",
  "serde",
  "serde_json",
@@ -5038,6 +5039,7 @@ dependencies = [
  "wordcraft-fonts",
  "wordcraft-geom",
  "wordcraft-layout",
+ "wordcraft-math",
  "wordcraft-render",
 ]
 

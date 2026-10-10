@@ -19,6 +19,7 @@ pub mod chrome;
 pub mod control;
 pub mod credits;
 pub mod dialogs;
+pub mod eqdialog;
 pub mod i18n;
 pub mod icons;
 pub mod keys;
