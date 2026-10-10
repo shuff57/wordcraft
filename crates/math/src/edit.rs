@@ -459,6 +459,7 @@ fn latex_cmd(name: &str) -> Option<Cmd> {
         "frac" | "dfrac" | "tfrac" | "cfrac" => Cmd::Node(Node::Frac { num: vec![], den: vec![] }, 0),
         "sqrt" => Cmd::Node(Node::Rad { deg: None, body: vec![] }, 0),
         "left" | "right" => Cmd::Nothing,
+        "infty" => Cmd::Sym('\u{221E}'),
         "lim" => Cmd::Node(Node::Limit { lower: true, base: vec![plain("lim")], lim: vec![] }, 1),
         _ => {
             if let Some((op, limits)) = linear::nary_op(name) {
@@ -495,6 +496,8 @@ pub struct Editor {
     expect_brace: bool,
     /// Unclosed argument braces typed so far; a `}` closes the innermost one.
     brace_depth: u32,
+    /// The radical's degree place was opened by a typed `[` after `\sqrt`, so a `]` closes it.
+    deg_typed: bool,
 }
 
 /// Most edits kept for undo.
@@ -511,7 +514,8 @@ struct Snap {
 impl Editor {
     /// Edit `math` with the caret at the end of the top row.
     pub fn new(math: Math) -> Editor {
-        let mut e = Editor { math, caret: Caret::default(), anchor: None, undo: vec![], redo: vec![], expect_brace: false, brace_depth: 0 };
+        let mut e =
+            Editor { math, caret: Caret::default(), anchor: None, undo: vec![], redo: vec![], expect_brace: false, brace_depth: 0, deg_typed: false };
         e.caret.pos = units(&e.math.body);
         e
     }
@@ -719,6 +723,15 @@ impl Editor {
             self.flush_cmd();
         }
         let expect = std::mem::take(&mut self.expect_brace);
+        if c == '[' && expect && self.open_degree() {
+            return;
+        }
+        if c == ']' && self.deg_typed && self.in_degree() {
+            self.deg_typed = false;
+            self.leave_right();
+            self.expect_brace = true;
+            return;
+        }
         if c == '{' && expect {
             self.brace_depth = self.brace_depth.saturating_add(1);
             return;
@@ -766,7 +779,10 @@ impl Editor {
                     self.insert_char('>');
                 }
             }
-            c if c.is_whitespace() || c.is_control() => {}
+            c if c.is_whitespace() => {
+                self.leave_nary_limit(false);
+            }
+            c if c.is_control() => {}
             c if ARG_ENDERS.contains(c) => {
                 self.leave_func_arg();
                 self.insert_char(c);
@@ -813,11 +829,63 @@ impl Editor {
 
     /// A character that cannot continue a command name ends a pending one (`\in` then a space).
     fn flush_cmd(&mut self) {
-        if let Some((bs, name)) = self.pending_cmd()
-            && latex_cmd(&name).is_some()
-        {
-            self.commit_cmd(bs, &name);
+        self.flush_word(true);
+    }
+
+    /// [`Self::flush_cmd`], with or without turning a finished `inf` into the infinity sign.
+    fn flush_word(&mut self, inf: bool) {
+        if let Some((bs, name)) = self.pending_cmd() {
+            if latex_cmd(&name).is_some() {
+                self.commit_cmd(bs, &name);
+            }
+        } else if inf {
+            self.flush_inf();
         }
+    }
+
+    /// The word `inf`, finished (by any other character, or by `flush`), becomes the infinity
+    /// sign. It waits that long because `infty` starts with it.
+    fn flush_inf(&mut self) {
+        if self.selection().is_some() {
+            return;
+        }
+        let cls = unit_chars(self.seq());
+        let pos = self.caret.pos.min(cls.len());
+        let mut s = pos;
+        while s > 0 && matches!(cls.get(s - 1), Some(Some(c)) if c.is_ascii_alphabetic()) {
+            s -= 1;
+        }
+        let run: String = cls.get(s..pos).unwrap_or(&[]).iter().filter_map(|c| *c).collect();
+        if run == "inf" && (s == 0 || cls.get(s - 1) != Some(&Some('\\'))) {
+            self.delete_range(s, pos);
+            self.insert_char('\u{221E}');
+        }
+    }
+
+    /// A `[` typed right after `\sqrt`: the radical gets a degree place, which a `]` closes.
+    fn open_degree(&mut self) -> bool {
+        if self.selection().is_some() || self.len_here() != 0 {
+            return false;
+        }
+        let Some(&(i, c)) = self.caret.path.last() else { return false };
+        let mut parent = self.caret.path.clone();
+        parent.pop();
+        let Some(Node::Rad { deg, body }) = seq_at_mut(&mut self.math.body, &parent).and_then(|s| s.get_mut(i)).map(bare_mut) else {
+            return false;
+        };
+        if deg.is_some() || c != 0 || !body.is_empty() {
+            return false;
+        }
+        *deg = Some(vec![]);
+        self.deg_typed = true;
+        true
+    }
+
+    /// The caret is in a radical's degree place.
+    fn in_degree(&self) -> bool {
+        let Some(&(i, c)) = self.caret.path.last() else { return false };
+        let parent = self.caret.path.get(..self.caret.path.len() - 1).and_then(|p| seq_at(&self.math.body, p));
+        c == 0 && matches!(parent.and_then(|s| s.get(i)).map(Node::bare), Some(Node::Rad { deg: Some(_), .. }))
     }
 
     /// Replace the typed `\name` (from `bs` to the caret) by what it stands for.
@@ -860,7 +928,8 @@ impl Editor {
         let Some(&(i, c)) = self.caret.path.last() else { return };
         let parent = self.caret.path.get(..self.caret.path.len() - 1).and_then(|p| seq_at(&self.math.body, p));
         match parent.and_then(|s| s.get(i)).map(Node::bare) {
-            Some(Node::Nary { sub, sup, .. }) if c < usize::from(sub.is_some()) + usize::from(sup.is_some()) => {}
+            // The other limit may still follow (`\sum_{i=1}^{n}`), but the last one is done.
+            Some(Node::Nary { sub, sup, .. }) if c + 1 < usize::from(sub.is_some()) + usize::from(sup.is_some()) => {}
             Some(Node::Frac { .. }) if c == 0 => {
                 self.leave_right();
                 self.expect_brace = true;
@@ -905,6 +974,31 @@ impl Editor {
         c >= 1 && matches!(parent.get(i).map(Node::bare), Some(Node::Script { .. }))
     }
 
+    /// A filled, unbraced limit of a big operator is over at a space (any limit) or at an
+    /// operator (the upper limit only: `sum_i=1^n` keeps its `=`): the caret goes on to the
+    /// operand, so `sum_(i=1)^n i^2` does not pour the summand into the upper limit. True when
+    /// the caret moved.
+    fn leave_nary_limit(&mut self, operator: bool) -> bool {
+        if self.brace_depth > 0 || self.selection().is_some() {
+            return false;
+        }
+        let Some(&(i, c)) = self.caret.path.last() else { return false };
+        if self.len_here() == 0 || self.caret.pos != self.len_here() {
+            return false;
+        }
+        let parent = self.caret.path.get(..self.caret.path.len() - 1).and_then(|p| seq_at(&self.math.body, p));
+        let Some(Node::Nary { sub, sup, .. }) = parent.and_then(|s| s.get(i)).map(Node::bare) else { return false };
+        let limits = usize::from(sub.is_some()) + usize::from(sup.is_some());
+        let upper = sup.is_some() && c + 1 == limits;
+        if c >= limits || (operator && !upper) {
+            return false;
+        }
+        self.caret.path.pop();
+        self.caret.path.push((i, limits));
+        self.caret.pos = 0;
+        true
+    }
+
     /// Typing an operator ends an unparenthesised function argument (`sin x+1` is `sin x`, plus
     /// 1) and leaves a filled exponent or subscript (`x^2+1` is `x` squared, plus 1).
     fn leave_func_arg(&mut self) {
@@ -923,6 +1017,7 @@ impl Editor {
                     self.caret.pos = start_of(self.seq(), i) + 1;
                 }
             } else {
+                self.leave_nary_limit(true);
                 return;
             }
         }
@@ -1002,12 +1097,21 @@ impl Editor {
         false
     }
 
-    /// A fraction's numerator or denominator that is just one `( )` group shows no parentheses
-    /// (the bar already groups): typing `(x-1)` in a denominator reads like the numerator does.
+    /// A fraction's numerator or denominator, a radicand, a script or a limit that is just one
+    /// `( )` group shows no parentheses (the structure already groups): typing `(x-1)` in a
+    /// denominator reads like the numerator does, and `sqrt(b^2-4ac)` and `_(i=1)` match.
     fn unwrap_frac_paren(&mut self) {
         let Some(&(pi, _)) = self.caret.path.last() else { return };
+        let Some(&(_, c)) = self.caret.path.last() else { return };
         let parent = self.caret.path.get(..self.caret.path.len() - 1).and_then(|p| seq_at(&self.math.body, p));
-        if !parent.and_then(|s| s.get(pi)).is_some_and(|n| matches!(n.bare(), Node::Frac { .. })) {
+        let groups = match parent.and_then(|s| s.get(pi)).map(Node::bare) {
+            Some(Node::Frac { .. } | Node::Rad { .. }) => true,
+            Some(Node::Script { .. }) => c >= 1,
+            Some(Node::Nary { sub, sup, .. }) => c < usize::from(sub.is_some()) + usize::from(sup.is_some()),
+            Some(Node::Limit { .. }) => c == 1,
+            _ => false,
+        };
+        if !groups {
             return;
         }
         if let Some(seq) = self.seq_mut() {
@@ -1383,7 +1487,8 @@ impl Editor {
     /// Press a navigation or deletion key; `shift` extends the selection (Left, Right, Home, End).
     pub fn key(&mut self, key: Key, shift: bool) {
         if !matches!(key, Key::Undo | Key::Redo) {
-            self.tracked(|e| e.flush_cmd());
+            let inf = !matches!(key, Key::Backspace | Key::Delete);
+            self.tracked(|e| e.flush_word(inf));
         }
         if !matches!(key, Key::Backspace | Key::Delete) {
             self.expect_brace = false;
@@ -1596,7 +1701,14 @@ impl Editor {
             // Behind a structure with something in it: step inside first (the next Backspace
             // deletes from its end), so one key never wipes a whole fraction.
             if self.solid_structure(pos - 1) {
+                let script = self.unit_info(pos - 1).is_some_and(|u| u.3);
                 self.move_left();
+                // A script has one visible tail, so the same key removes its last character
+                // (stepping in with no visible change reads as a dead key).
+                let n = self.len_here();
+                if script && n > 0 && !self.solid_structure(n - 1) {
+                    self.delete_range(n - 1, n);
+                }
             } else {
                 self.delete_range(pos - 1, pos);
             }

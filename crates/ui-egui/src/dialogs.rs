@@ -324,11 +324,18 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context) {
         Dialog::Equation { st } if st.is_edit() => "Edit Equation",
         Dialog::Equation { .. } => "Equation",
     };
+    // The equation editor sits at the bottom so the page, where the equation is being edited in
+    // place, stays visible above it.
+    let anchor = if matches!(d, Dialog::Equation { .. }) {
+        (egui::Align2::CENTER_BOTTOM, vec2(0.0, -24.0))
+    } else {
+        (egui::Align2::CENTER_CENTER, vec2(0.0, -40.0))
+    };
     egui::Window::new(tl!(title))
         .id(egui::Id::new(("dialog", title)))
         .collapsible(false)
         .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, -40.0))
+        .anchor(anchor.0, anchor.1)
         .open(&mut open)
         .show(ctx, |ui| {
             ui.set_min_width(340.0);
@@ -337,6 +344,9 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context) {
     if open && !close {
         app.dialog = Some(d);
     } else {
+        if let Dialog::Equation { st } = &mut d {
+            crate::eqdialog::finish(app, st);
+        }
         app.canvas.want_focus = true;
     }
 }

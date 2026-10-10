@@ -759,3 +759,69 @@ fn select_between_covers_whole_structures_across_rows() {
     e.select_between(&Caret { path: vec![(9, 9)], pos: 9 }, &Caret { path: vec![(8, 1), (1, 1)], pos: 99 });
     assert!(e.is_valid());
 }
+
+#[test]
+fn typed_latex_root_degree() {
+    let e = typed("\\sqrt[3]{x}");
+    assert!(matches!(e.math().body.first(), Some(Node::Rad { deg: Some(d), body }) if units(d) == 1 && units(body) == 1), "{:?}", e.math().body);
+    assert_eq!(ty("\\sqrt[3]{x}+1"), ty("\\sqrt[3]{x}") + "+1");
+    // Without a command in front a `[` is a bracket as before, also inside a radical.
+    let e = typed("sqrt[");
+    assert!(matches!(e.math().body.first(), Some(Node::Rad { deg: None, .. })));
+    // A stray `]` never panics.
+    let e = typed("\\sqrt[]]");
+    assert!(e.is_valid());
+}
+
+#[test]
+fn parentheses_closing_a_radicand_or_script_are_not_kept() {
+    let strip = |s: &str| ty(s).replace(' ', "");
+    assert_eq!(strip("sqrt(b^2-4ac)"), "√(b^2−4ac)");
+    let e = typed("sqrt(b^2-4ac)");
+    assert!(matches!(e.math().body.first(), Some(Node::Rad { body, .. }) if !body.iter().any(|n| matches!(n.bare(), Node::Delim { .. }))));
+    let e = typed("sum_(i=1)^n");
+    assert!(
+        matches!(e.math().body.first(), Some(Node::Nary { sub: Some(s), .. }) if !s.iter().any(|n| matches!(n.bare(), Node::Delim { .. }))),
+        "{:?}",
+        e.math().body
+    );
+    let e = typed("x^(n+1)");
+    assert!(matches!(e.math().body.first(), Some(Node::Script { sup: Some(s), .. }) if !s.iter().any(|n| matches!(n.bare(), Node::Delim { .. }))));
+    // Nested groups keep the inner ones, and the quadratic formula still closes properly.
+    let e = typed("x=(-b+-sqrt(b^2-4ac))/2a");
+    assert!(matches!(e.math().body.last(), Some(Node::Frac { .. })));
+}
+
+#[test]
+fn backspace_after_an_exponent_deletes_its_last_character() {
+    let mut e = typed("z^3");
+    e.key(Key::Right, false);
+    assert!(e.caret().path.is_empty());
+    e.key(Key::Backspace, false);
+    assert_eq!(lin(&e), "z^()");
+    e.type_str("2");
+    assert_eq!(lin(&e), "z^2");
+}
+
+#[test]
+fn a_space_ends_an_upper_limit_and_inf_becomes_infinity() {
+    let e = typed("sum_(i=1)^n i^2=1/2");
+    let Some(Node::Nary { sup: Some(sup), body, .. }) = e.math().body.first().map(Node::bare) else { panic!("{:?}", e.math().body) };
+    assert_eq!(units(sup), 1, "the upper limit is just n");
+    assert!(units(body) >= 2, "the summand follows: {body:?}");
+    // The braced form ends the last limit at its closing brace.
+    let e = typed("\\sum_{i=1}^{n}i");
+    assert!(matches!(e.math().body.first().map(Node::bare), Some(Node::Nary { sup: Some(s), .. }) if units(s) == 1));
+    // `inf` converts once the word is over, and `infty` still works.
+    let mut e = typed("x->inf");
+    assert_eq!(lin(&e).chars().last(), Some('f'), "still being typed");
+    e.flush();
+    assert_eq!(lin(&e).chars().last(), Some('\u{221E}'));
+    assert_eq!(lin(&typed("inf+1")), "\u{221E}+1");
+    assert_eq!(lin(&typed("\\infty")), "\u{221E}");
+    assert_eq!(lin(&typed("infty")), "\u{221E}");
+    assert_eq!(lin(&typed("info")), "info");
+    let mut e = typed("inf");
+    e.key(Key::Backspace, false);
+    assert_eq!(lin(&e), "in", "Backspace edits the word instead of converting it");
+}

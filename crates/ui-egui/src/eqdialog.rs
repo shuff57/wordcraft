@@ -5,8 +5,13 @@
 //! exponent; `/` makes a fraction, `sqrt` a root, Greek names become symbols, the arrow keys walk
 //! the tree and a click places the caret. The editing itself lives in `wordcraft_math::Editor`
 //! (pure, tested); this file draws it and turns egui input into editor calls. A template palette
-//! and a linear-text field are secondary ways in. Insert and Update go through the
-//! `insert.equation` / `equation.update` commands; re-editing loads `equation.get`.
+//! and a linear-text field are secondary ways in.
+//!
+//! The equation is edited in place: every change is applied to the document at once through
+//! `insert.equation` (the first one) and `equation.update` (the rest, joined into one undo step),
+//! so the page behind the dialog shows it at document size, selected. Insert / Update / Enter
+//! keep it; Cancel, Esc twice and the close button undo it. With Track Changes on the document is
+//! left alone until Insert / Update. Re-editing loads `equation.get`.
 
 use std::sync::Arc;
 
@@ -22,7 +27,7 @@ use crate::theme::{self, Tokens};
 
 /// Size of the canvas, in points.
 const CANVAS_W: f32 = 540.0;
-const CANVAS_H: f32 = 150.0;
+const CANVAS_H: f32 = 100.0;
 /// Font size of the equation on the canvas, points.
 const EQ_PT: f64 = 28.0;
 /// Space around the equation inside the canvas layout, points.
@@ -90,6 +95,16 @@ pub struct EqState {
     discard_armed: bool,
     /// Where the canvas was drawn last frame: top-left of the equation and points per layout point.
     view: (egui::Pos2, f32),
+    /// The dialog was opened on an equation that was already in the document.
+    existing: bool,
+    /// The document holds this dialog's edit (one undo step) that Cancel must take back.
+    live: bool,
+    /// Insert / Update was pressed and succeeded: the edit stays.
+    committed: bool,
+    /// The tree changed since the document last got it.
+    unsynced: bool,
+    /// The OMML the document holds now, to skip identical updates.
+    last_sent: Option<String>,
 }
 
 impl std::fmt::Debug for EqState {
@@ -116,6 +131,11 @@ impl EqState {
             initial: Math::default(),
             discard_armed: false,
             view: (pos2(0.0, 0.0), 1.0),
+            existing: false,
+            live: false,
+            committed: false,
+            unsynced: false,
+            last_sent: None,
         }
     }
 
@@ -132,6 +152,8 @@ impl EqState {
                     st.initial = st.ed.math().clone();
                     // Update the very equation that was read, even if the selection moves meanwhile.
                     st.target = Some(json!({"pos": v.get("pos").cloned().unwrap_or(pos)}));
+                    st.existing = true;
+                    st.last_sent = Some(o.to_string());
                 }
             }
             Err(e) => st.error = Some(e.to_string()),
@@ -141,7 +163,7 @@ impl EqState {
 
     /// True when the dialog edits an existing equation (Update) rather than inserting one.
     pub fn is_edit(&self) -> bool {
-        self.target.is_some()
+        self.existing
     }
 
     /// The text of the linear field changed: rebuild the tree from it.
@@ -150,6 +172,7 @@ impl EqState {
         let mut m = from_linear(&self.linear);
         m.para = para;
         self.ed.set_math(m);
+        self.unsynced = true;
     }
 
     /// The tree changed through the canvas or the palette: show it in the linear field.
@@ -157,6 +180,7 @@ impl EqState {
         self.linear = to_linear(self.ed.math());
         self.error = None;
         self.discard_armed = false;
+        self.unsynced = true;
     }
 
     /// True when closing now would lose an edit.
@@ -470,6 +494,70 @@ fn palette(ui: &mut Ui, st: &mut EqState) {
     }
 }
 
+/// Apply the edited tree to the document so the page shows it (no-op while Track Changes is on,
+/// for a blank tree, or when the document already has exactly this). True when the document
+/// holds the tree afterwards.
+fn sync_live(app: &mut WordApp, st: &mut EqState, force: bool) -> bool {
+    if !force && !st.unsynced {
+        return false;
+    }
+    if app.session.doc.settings.track_changes || st.ed.is_blank() {
+        return false;
+    }
+    st.unsynced = false;
+    let omml = to_omml(st.ed.math());
+    if st.last_sent.as_deref() == Some(omml.as_str()) {
+        return true;
+    }
+    let mut p = json!({"omml": omml});
+    let update = st.target.is_some();
+    if let (true, Some(t), Some(o)) = (update, &st.target, p.as_object_mut())
+        && let Some(src) = t.as_object()
+    {
+        o.extend(src.clone());
+    }
+    if update && st.live {
+        // One undo step for the whole editing session.
+        app.session.join_next_undo();
+    }
+    match app.run(if update { "equation.update" } else { "insert.equation" }, p) {
+        Ok(v) => {
+            st.live = true;
+            st.last_sent = Some(omml);
+            if st.target.is_none()
+                && let Some(pos) = v.get("pos")
+            {
+                st.target = Some(json!({"pos": pos}));
+            }
+            // Select the equation on the page: it reads as the thing being edited.
+            let at = st.target.as_ref().and_then(|t| t.get("pos")).and_then(|p| serde_json::from_value::<wordcraft_doc::Pos>(p.clone()).ok());
+            if let Some(at) = at {
+                let end = wordcraft_doc::Pos { off: at.off + wordcraft_doc::para::OBJ.len_utf8(), ..at.clone() };
+                app.session.sel = wordcraft_engine::Selection { anchor: at, focus: end };
+            }
+            true
+        }
+        Err(e) => {
+            st.error = Some(e);
+            false
+        }
+    }
+}
+
+/// The dialog is going away: take back the live edit unless it was kept, and leave the caret
+/// after the equation when it was.
+pub fn finish(app: &mut WordApp, st: &mut EqState) {
+    if st.committed {
+        if let Some(at) = st.target.as_ref().and_then(|t| t.get("pos")).and_then(|p| serde_json::from_value::<wordcraft_doc::Pos>(p.clone()).ok()) {
+            let end = wordcraft_doc::Pos { off: at.off + wordcraft_doc::para::OBJ.len_utf8(), ..at };
+            app.session.sel = wordcraft_engine::Selection::caret(end);
+        }
+    } else if st.live && matches!(app.session.undo_label(), Some("Equation" | "Edit Equation")) {
+        let _ = app.run("edit.undo", json!({}));
+    }
+    st.live = false;
+}
+
 /// Draw the dialog body; true when the dialog should close.
 pub fn body(app: &mut WordApp, ui: &mut Ui, st: &mut EqState) -> bool {
     ui.set_min_width(CANVAS_W + 14.0);
@@ -501,7 +589,9 @@ pub fn body(app: &mut WordApp, ui: &mut Ui, st: &mut EqState) -> bool {
     let mut display = st.ed.math().para;
     if ui.checkbox(&mut display, tl!("Display on its own line")).changed() {
         st.ed.math_mut().para = display;
+        st.unsynced = true;
     }
+    sync_live(app, st, false);
     // One line is always reserved for the error, so showing it does not move the buttons.
     ui.allocate_ui_with_layout(vec2(CANVAS_W, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
         if let Some(e) = &st.error {
@@ -509,7 +599,6 @@ pub fn body(app: &mut WordApp, ui: &mut Ui, st: &mut EqState) -> bool {
         }
     });
 
-    let editing = st.is_edit();
     let esc = ui.input(|i| i.key_pressed(Key::Escape));
     let (mut ok, mut cancel) = (std::mem::take(&mut st.submit), false);
     ui.horizontal(|ui| {
@@ -517,7 +606,7 @@ pub fn body(app: &mut WordApp, ui: &mut Ui, st: &mut EqState) -> bool {
             if ui.button(tl!("Cancel")).clicked() {
                 cancel = true;
             }
-            let label = if editing { tl!("Update") } else { tl!("Insert") };
+            let label = if st.is_edit() { tl!("Update") } else { tl!("Insert") };
             let b = ui.add(egui::Button::new(egui::RichText::new(label).color(egui::Color32::WHITE)).fill(theme::APP_COLOR));
             ok |= b.clicked();
         });
@@ -531,14 +620,27 @@ pub fn body(app: &mut WordApp, ui: &mut Ui, st: &mut EqState) -> bool {
             st.error = Some(tl!("Type or build an equation first.").to_string());
             return false;
         }
+        st.unsynced = true;
+        if sync_live(app, st, true) {
+            st.committed = true;
+            return true;
+        }
+        if st.error.is_some() {
+            return false;
+        }
+        // Track Changes: the document was not touched while editing; apply it now.
+        let update = st.target.is_some();
         let mut p = json!({"omml": to_omml(st.ed.math())});
         if let (Some(t), Some(o)) = (&st.target, p.as_object_mut())
             && let Some(src) = t.as_object()
         {
             o.extend(src.clone());
         }
-        return match app.run(if editing { "equation.update" } else { "insert.equation" }, p) {
-            Ok(_) => true,
+        return match app.run(if update { "equation.update" } else { "insert.equation" }, p) {
+            Ok(_) => {
+                st.committed = true;
+                true
+            }
             Err(e) => {
                 st.error = Some(e);
                 false
@@ -1071,5 +1173,87 @@ mod tests {
             h.step();
         }
         assert!(matches!(&h.state().dialog, Some(Dialog::Equation { st }) if st.is_edit()), "{:?}", h.state().dialog.as_ref().map(Dialog::name));
+    }
+
+    fn eq_linear(app: &mut WordApp) -> String {
+        app.session.run("equation.get", &json!({"index": 0})).ok().and_then(|v| v["linear"].as_str().map(str::to_string)).unwrap_or_default()
+    }
+
+    #[test]
+    fn typing_edits_the_equation_in_the_page_at_once() {
+        let mut h = opened();
+        assert_eq!(eq_count(h.state()), 0);
+        typ(&mut h, "x^2");
+        assert_eq!(eq_count(h.state()), 1, "the page shows the equation while the dialog is open");
+        assert!(h.state().dialog.is_some());
+        press(&mut h, Key::ArrowRight);
+        typ(&mut h, "+1");
+        assert_eq!(eq_count(h.state()), 1, "still one equation, updated in place");
+        assert!(eq_linear(h.state_mut()).contains('1'));
+        let sel = h.state().session.sel.clone();
+        assert!(!sel.is_collapsed(), "the equation is selected on the page");
+        h.get_by_label("Insert").click_accesskit();
+        h.run();
+        assert!(h.state().dialog.is_none());
+        assert_eq!(eq_count(h.state()), 1);
+        assert!(h.state().session.sel.is_collapsed(), "the caret goes after the equation");
+        // The whole editing session is one undo step.
+        assert!(h.state_mut().session.undo());
+        assert_eq!(eq_count(h.state()), 0);
+    }
+
+    #[test]
+    fn cancel_and_escape_take_the_live_edit_back() {
+        let mut h = opened();
+        typ(&mut h, "x^2");
+        press(&mut h, Key::ArrowRight);
+        typ(&mut h, "+1");
+        h.get_by_label("Cancel").click_accesskit();
+        h.run();
+        assert!(h.state().dialog.is_none());
+        assert_eq!(eq_count(h.state()), 0, "Cancel removes the inserted equation");
+        let mut h = opened();
+        typ(&mut h, "x^2");
+        press(&mut h, Key::Escape);
+        assert_eq!(eq_count(h.state()), 1, "the first Escape only warns");
+        press(&mut h, Key::Escape);
+        assert!(h.state().dialog.is_none());
+        assert_eq!(eq_count(h.state()), 0);
+    }
+
+    #[test]
+    fn cancelling_a_reedit_restores_the_original() {
+        let mut a = app();
+        a.run("insert.equation", json!({"linear": "a/b"})).unwrap();
+        let before = eq_linear(&mut a);
+        open(&mut a);
+        let mut h = harness(a);
+        h.run();
+        h.run();
+        press(&mut h, Key::Home);
+        typ(&mut h, "z");
+        assert_ne!(eq_linear(h.state_mut()), before, "the page follows the edit");
+        h.get_by_label("Cancel").click_accesskit();
+        h.run();
+        assert_eq!(eq_count(h.state()), 1);
+        assert_eq!(eq_linear(h.state_mut()), before);
+        // The earlier insert is still one undo step away, not consumed by Cancel.
+        assert!(h.state().session.can_undo());
+    }
+
+    #[test]
+    fn track_changes_leaves_the_page_alone_until_insert() {
+        let mut a = app();
+        a.run("review.trackChanges", json!({"on": true})).ok();
+        a.session.doc.settings.track_changes = true;
+        open(&mut a);
+        let mut h = harness(a);
+        h.run();
+        h.run();
+        typ(&mut h, "x^2");
+        assert_eq!(eq_count(h.state()), 0);
+        h.get_by_label("Insert").click_accesskit();
+        h.run();
+        assert_eq!(eq_count(h.state()), 1);
     }
 }
