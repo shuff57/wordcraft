@@ -4888,6 +4888,7 @@ dependencies = [
  "thiserror 2.0.21",
  "wordcraft-doc",
  "wordcraft-geom",
+ "wordcraft-math",
  "zip",
 ]
 
@@ -4956,6 +4957,14 @@ dependencies = [
  "wordcraft-fonts",
  "wordcraft-geom",
  "wordcraft-proof",
+]
+
+[[package]]
+name = "wordcraft-math"
+version = "0.3.0"
+dependencies = [
+ "quick-xml 0.38.4",
+ "serde",
 ]
 
 [[package]]

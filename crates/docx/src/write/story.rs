@@ -285,17 +285,22 @@ impl Writer<'_> {
                     w.close("w:r");
                 }
             }
-            InlineObject::Equation { linear, display } => {
-                if *display {
-                    w.open("m:oMathPara", &[]);
-                }
-                w.open("m:oMath", &[]);
-                w.open("m:r", &[]);
-                w.leaf("m:t", &[("xml:space", "preserve")], linear);
-                w.close("m:r");
-                w.close("m:oMath");
-                if *display {
-                    w.close("m:oMathPara");
+            InlineObject::Equation { linear, display, omml } => {
+                // Stored OMML goes back untouched (its root declares the m namespace itself).
+                if let Some(x) = omml.as_deref().filter(|x| !x.trim().is_empty()) {
+                    w.raw(x);
+                } else {
+                    if *display {
+                        w.open("m:oMathPara", &[]);
+                    }
+                    w.open("m:oMath", &[]);
+                    w.open("m:r", &[]);
+                    w.leaf("m:t", &[("xml:space", "preserve")], linear);
+                    w.close("m:r");
+                    w.close("m:oMath");
+                    if *display {
+                        w.close("m:oMathPara");
+                    }
                 }
             }
             InlineObject::Field { instr, result, locked } => self.field(w, instr, result, *locked, props),

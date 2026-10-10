@@ -580,7 +580,7 @@ fn shapes_textboxes_equations_dropcaps_round_trip() {
         float: Float::default(),
         story: None,
     };
-    let eq = InlineObject::Equation { linear: "x=(-b±√(b^2-4ac))/2a".into(), display: false };
+    let eq = InlineObject::Equation { linear: "x=(-b±√(b^2-4ac))/2a".into(), display: false, omml: None };
     let mut p = Paragraph::with_text("shapes ", CharProps::default());
     for o in [tb, star.clone(), eq.clone()] {
         let end = p.len();
@@ -605,7 +605,14 @@ fn shapes_textboxes_equations_dropcaps_round_trip() {
         o => panic!("{o:?}"),
     }
     assert_eq!(got[0].objects[1], star);
-    assert_eq!(got[0].objects[2], eq);
+    // Written without stored OMML; read back it gains the (verbatim) OMML source.
+    match (&got[0].objects[2], &eq) {
+        (InlineObject::Equation { linear, display, omml }, InlineObject::Equation { linear: l0, display: d0, .. }) => {
+            assert_eq!((linear, display), (l0, d0));
+            assert!(omml.is_some());
+        }
+        o => panic!("{o:?}"),
+    }
     assert_eq!(got.len(), 2, "drop cap paragraph merges back");
     assert_eq!(got[1].text, dc.text);
     assert_eq!(got[1].props, dc.props);
@@ -760,4 +767,74 @@ fn ensure_empty_and_table_end_document_is_valid() {
     e.body.clear();
     let r = rt(&e);
     assert_eq!(r.body.len(), 1);
+}
+
+// ---- Office Math (hand-written OMML) ----
+
+const FRAC: &str = r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:f><m:num><m:r><m:t>a</m:t></m:r></m:num><m:den><m:r><m:t>b</m:t></m:r></m:den></m:f><m:r><m:t>+1</m:t></m:r></m:oMath>"#;
+const DISPLAY: &str = r#"<m:oMathPara xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:oMathParaPr><m:jc m:val="left"/></m:oMathParaPr><m:oMath><m:rad><m:radPr><m:degHide m:val="1"/></m:radPr><m:deg/><m:e><m:r><m:t>x</m:t></m:r></m:e></m:rad></m:oMath></m:oMathPara>"#;
+
+fn eq_of(p: &Paragraph, i: usize) -> (String, bool, Option<String>) {
+    match &p.objects[i] {
+        InlineObject::Equation { linear, display, omml } => (linear.clone(), *display, omml.clone()),
+        o => panic!("{o:?}"),
+    }
+}
+
+#[test]
+fn omml_inline_and_display_round_trip_unchanged() {
+    let mut p = Paragraph::with_text("see ", CharProps::default());
+    for (lin, disp, x) in [("a/b+1", false, FRAC), ("√x", true, DISPLAY)] {
+        let end = p.len();
+        p.insert_object(end, InlineObject::Equation { linear: lin.into(), display: disp, omml: Some(x.into()) }, &CharProps::default()).unwrap();
+    }
+    let mut d = Document::new();
+    d.body = vec![para_block(p)];
+    let bytes = wordcraft_docx::write(&d).unwrap();
+    let r = wordcraft_docx::read(&bytes).unwrap();
+    let got = paras(&r);
+    assert_eq!(got[0].objects.len(), 2);
+    let (l0, d0, x0) = eq_of(got[0], 0);
+    let (l1, d1, x1) = eq_of(got[0], 1);
+    assert!(!d0 && d1);
+    assert_eq!(x0.as_deref(), Some(FRAC), "inline OMML is stored verbatim");
+    assert_eq!(x1.as_deref(), Some(DISPLAY), "display OMML keeps its paragraph properties");
+    assert!(l0.contains('/') && l0.contains("+1"), "{l0}");
+    assert!(l1.contains('√'), "{l1}");
+    // A second round trip is stable.
+    let again = rt(&r);
+    assert_eq!(eq_of(paras(&again)[0], 0).2.as_deref(), Some(FRAC));
+    // The writer declares the m namespace on the document root.
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("word/document.xml").unwrap(), &mut xml).unwrap();
+    assert!(xml.contains("xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\""));
+    assert!(xml.contains("<m:oMathPara"));
+}
+
+#[test]
+fn omml_inside_table_cell_round_trips() {
+    let mut t = Table::new(1, 1, 200.0);
+    let mut p = Paragraph::new();
+    p.insert_object(0, InlineObject::Equation { linear: "a/b+1".into(), display: false, omml: Some(FRAC.into()) }, &CharProps::default()).unwrap();
+    t.rows[0].cells[0].blocks = vec![para_block(p)];
+    let mut d = Document::new();
+    d.body = vec![Arc::new(Block::Table(t)), para_block(Paragraph::new())];
+    let r = rt(&d);
+    let Some(Block::Table(t)) = r.body.first().map(|b| &**b) else { panic!("table") };
+    let cp = t.rows[0].cells[0].blocks.iter().find_map(|b| b.as_para()).unwrap();
+    assert_eq!(eq_of(cp, 0).2.as_deref(), Some(FRAC));
+}
+
+#[test]
+fn equation_without_omml_still_writes_linear_text() {
+    let mut p = Paragraph::new();
+    p.insert_object(0, InlineObject::Equation { linear: "x+1".into(), display: true, omml: None }, &CharProps::default()).unwrap();
+    let mut d = Document::new();
+    d.body = vec![para_block(p)];
+    let r = rt(&d);
+    let (lin, disp, omml) = eq_of(paras(&r)[0], 0);
+    assert!(disp);
+    assert!(lin.contains("x+1"), "{lin}");
+    assert!(omml.is_some_and(|x| x.contains("oMathPara")));
 }

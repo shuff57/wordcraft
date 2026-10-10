@@ -370,3 +370,21 @@ fn header_self_reference_and_escaping_targets() {
     let out = wordcraft_docx::write(&d).unwrap();
     wordcraft_docx::read(&out).unwrap();
 }
+
+#[test]
+fn omml_in_paragraph_reads_structure_and_unknown_prefixes() {
+    // Producer-chosen prefix `mm`, extra `a:` content inside a run: names are canonicalised on read.
+    let d = read_body(
+        r#"<w:p><w:r><w:t>E: </w:t></w:r><mm:oMath xmlns:mm="http://schemas.openxmlformats.org/officeDocument/2006/math"><mm:sSup><mm:e><mm:r><mm:t>x</mm:t></mm:r></mm:e><mm:sup><mm:r><mm:t>2</mm:t></mm:r></mm:sup></mm:sSup></mm:oMath></w:p>"#,
+    );
+    let p = paras(&d)[0].clone();
+    match &p.objects[0] {
+        InlineObject::Equation { linear, display, omml } => {
+            assert!(!display);
+            assert!(linear.contains('x') && linear.contains('2'), "{linear}");
+            let x = omml.as_deref().unwrap();
+            assert!(x.starts_with("<m:oMath xmlns:m=") && x.contains("<m:sSup>"), "{x}");
+        }
+        o => panic!("{o:?}"),
+    }
+}

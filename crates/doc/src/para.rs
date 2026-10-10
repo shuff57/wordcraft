@@ -169,11 +169,16 @@ pub enum InlineObject {
     CommentEnd {
         id: u32,
     },
-    /// An equation in linear format (`x=(-b±√(b^2-4ac))/2a`).
+    /// An equation. `linear` is the typed one-line form (`x=(-b±√(b^2-4ac))/2a`) and the
+    /// plain-text fallback; `omml` is the structured source (a standalone `m:oMath`, or
+    /// `m:oMathPara` for display math, declaring its own namespaces) kept so the file writes back
+    /// unchanged. Editing an equation replaces both fields together.
     Equation {
         linear: String,
         #[serde(default)]
         display: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        omml: Option<String>,
     },
     /// Something we don't model, kept for round-trip (raw XML of the source format).
     Opaque {

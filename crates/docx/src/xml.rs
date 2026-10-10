@@ -154,6 +154,65 @@ impl El {
         }
         go(self, name, 0)
     }
+    /// Serialise this element (and its subtree) as standalone XML: the root declares the
+    /// namespaces its names use, so the string parses on its own.
+    pub fn to_xml(&self) -> String {
+        let mut prefixes: Vec<String> = Vec::new();
+        fn collect(e: &El, out: &mut Vec<String>, depth: usize) {
+            if depth > MAX_DEPTH {
+                return;
+            }
+            for n in std::iter::once(e.name.as_str()).chain(e.attrs.iter().map(|(k, _)| k.as_str())) {
+                if let Some((p, _)) = n.split_once(':')
+                    && !out.iter().any(|x| x == p)
+                {
+                    out.push(p.to_string());
+                }
+            }
+            for c in e.els() {
+                collect(c, out, depth + 1);
+            }
+        }
+        collect(self, &mut prefixes, 0);
+        let mut decls = String::new();
+        for p in &prefixes {
+            if let Some((_, uri)) = NAMESPACES.iter().find(|(k, _)| k == p) {
+                decls.push_str(&format!(" xmlns:{p}=\"{uri}\""));
+            }
+        }
+        fn qname(n: &str) -> &str {
+            n.strip_prefix("?:").unwrap_or(n)
+        }
+        fn go(e: &El, o: &mut String, decls: &str, depth: usize) {
+            o.push('<');
+            o.push_str(qname(&e.name));
+            o.push_str(decls);
+            for (k, v) in &e.attrs {
+                o.push(' ');
+                o.push_str(qname(k));
+                o.push_str("=\"");
+                o.push_str(&esc(v));
+                o.push('"');
+            }
+            if e.kids.is_empty() || depth > MAX_DEPTH {
+                o.push_str("/>");
+                return;
+            }
+            o.push('>');
+            for n in &e.kids {
+                match n {
+                    Node::Text(t) => o.push_str(&esc(t)),
+                    Node::El(c) => go(c, o, "", depth + 1),
+                }
+            }
+            o.push_str("</");
+            o.push_str(qname(&e.name));
+            o.push('>');
+        }
+        let mut out = String::new();
+        go(self, &mut out, &decls, 0);
+        out
+    }
     /// Local part of the name.
     pub fn local(&self) -> &str {
         self.name.rsplit(':').next().unwrap_or(&self.name)

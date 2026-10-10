@@ -308,15 +308,12 @@ impl Reader<'_> {
                 }
             }
             "w:smartTag" | "w:customXml" | "w:dir" | "w:bdo" => self.read_inline_children(sc, pb, k, rels, ctx, depth + 1),
-            "m:oMath" => {
+            "m:oMath" | "m:oMathPara" => {
                 let props = self.run_props_none(ctx);
-                self.emit_obj(sc, pb, InlineObject::Equation { linear: k.deep_text(), display: false }, &props);
-            }
-            "m:oMathPara" => {
-                let props = self.run_props_none(ctx);
-                for m in k.children("m:oMath") {
-                    self.emit_obj(sc, pb, InlineObject::Equation { linear: m.deep_text(), display: true }, &props);
-                }
+                let omml = k.to_xml();
+                let linear = wordcraft_math::to_linear(&wordcraft_math::from_omml(&omml));
+                let display = k.name == "m:oMathPara";
+                self.emit_obj(sc, pb, InlineObject::Equation { linear, display, omml: Some(omml) }, &props);
             }
             "mc:AlternateContent" => {
                 if let Some(c) = children_of_choice(k) {
