@@ -553,3 +553,54 @@ fn equations_from_omml_or_hostile_text_lay_out() {
     let pl = first_para(&l);
     assert!(pl.height.is_finite() && pl.height > 0.0);
 }
+
+#[test]
+fn long_inline_equation_breaks_at_operators_within_the_line() {
+    let lin = vec!["abc"; 200].join("+");
+    let d = doc_with_eq("see ", &lin, false, " end");
+    let ld = lay(&d);
+    let pl = first_para(&ld);
+    let k = pl.clusters.iter().position(|c| matches!(c.kind, para::ClKind::Object(_))).unwrap();
+    let e = pl.eq_at(k).unwrap();
+    let line = pl.lines.iter().find(|l| (l.c0..l.c1).contains(&k)).unwrap();
+    assert!(e.bx.width() as f32 <= line.right - line.left + 0.5, "{} wider than the line", e.bx.width());
+    assert!(e.bx.ascent() + e.bx.descent() > 4.0 * 11.0, "several rows tall");
+    // Every glyph of the render stays on the page.
+    let items = display::page_display(&d, &ld.pages[0], &display::DisplayOptions::default());
+    let page_w = ld.pages[0].w;
+    for it in &items {
+        if let display::Draw::Glyphs { glyphs, .. } = it {
+            for g in glyphs {
+                assert!(g.1 < page_w, "glyph at {} beyond the page", g.1);
+            }
+        }
+    }
+    // An equation with no operator to break at still wraps between its items.
+    let d2 = doc_with_eq("", &"x^2 ".repeat(300), false, "");
+    let pl2 = first_para(&lay(&d2));
+    let k2 = pl2.clusters.iter().position(|c| matches!(c.kind, para::ClKind::Object(_))).unwrap();
+    assert!(pl2.eq_at(k2).unwrap().bx.width() < 500.0);
+}
+
+#[test]
+fn line_before_a_display_equation_is_not_justified() {
+    let mut d = doc_with_eq("A few words before it. ", "a/b", true, " tail");
+    d.para_mut(StoryRef::Body, &Path::top(0)).unwrap().props.align = Some(wordcraft_doc::props::Align::Justify);
+    let pl = first_para(&lay(&d));
+    let k = pl.clusters.iter().position(|c| matches!(c.kind, para::ClKind::Object(_))).unwrap();
+    let line = pl.lines.iter().find(|l| l.c1 > 1 && l.c1 <= k + 1 && l.c0 == 0).unwrap();
+    let last = (line.c1 - 1).min(k.saturating_sub(1));
+    let end = line.xs[last - line.c0] + pl.clusters[last].adv;
+    assert!(end < line.right - 100.0, "line stretched to {end} of {}", line.right);
+}
+
+#[test]
+fn display_equation_line_has_room_above_and_below() {
+    let plain = Document::from_text("ab");
+    let d = doc_with_eq("a", "x/y", true, "b");
+    let (lp, pl) = (first_para(&lay(&plain)), first_para(&lay(&d)));
+    let k = pl.clusters.iter().position(|c| matches!(c.kind, para::ClKind::Object(_))).unwrap();
+    let line = pl.lines.iter().find(|l| (l.c0..l.c1).contains(&k)).unwrap();
+    let e = pl.eq_at(k).unwrap();
+    assert!(line.height > (e.bx.ascent() + e.bx.descent()) as f32 + lp.lines[0].height * 0.4, "padded line: {}", line.height);
+}

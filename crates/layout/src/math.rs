@@ -360,6 +360,10 @@ struct Lay {
     path: Vec<(usize, usize)>,
     /// Index, in its row, of the node being laid out.
     cur: usize,
+    /// Widest the top-level row may be before it breaks into several lines, points.
+    wrap: f64,
+    /// Parts of the top-level row after which it may break (after a binary operator or relation).
+    brks: Vec<usize>,
 }
 
 /// Ink box of a glyph in font units, y down: (x0, y0, x1, y1).
@@ -528,10 +532,65 @@ impl Lay {
         let at = |k: usize| pre.get(k).copied().unwrap_or(x);
         let mut xs: Vec<f64> = marks.iter().map(|m| at(m.0) + m.2 * (at(m.1) - at(m.0))).collect();
         xs.push(x);
-        let mut row = MathBox::row(parts);
         let sz = self.size * st.factor();
+        if self.path.is_empty() && depth == 0 && x > self.wrap {
+            let brks = std::mem::take(&mut self.brks);
+            return self.wrapped(parts, &brks, sz);
+        }
+        let mut row = MathBox::row(parts);
         row.geo.push(SeqGeo { path, xs, top: (-row.asc).min(-0.72 * sz), bottom: row.desc.max(0.22 * sz) });
         row
+    }
+
+    /// The top-level `parts` broken into lines of at most `self.wrap` points, stacked left-aligned.
+    fn wrapped(&self, parts: Vec<MathBox>, brks: &[usize], sz: f64) -> MathBox {
+        let max = self.wrap.max(4.0 * sz);
+        // Choose where each line starts, by widths alone.
+        let mut starts = vec![0usize];
+        let (mut x, mut start, mut last): (f64, usize, Option<usize>) = (0.0, 0, None);
+        for (i, p) in parts.iter().enumerate() {
+            if brks.binary_search(&i).is_ok() && i > start {
+                last = Some(i);
+            }
+            if x + p.w > max && i > start {
+                let at = last.filter(|b| *b > start && *b <= i).unwrap_or(i);
+                starts.push(at);
+                x = parts.get(at..i).map_or(0.0, |s| s.iter().map(|q| q.w).sum());
+                start = at;
+                last = None;
+            }
+            x += p.w;
+        }
+        let mut rows: Vec<MathBox> = Vec::new();
+        let mut it = parts.into_iter().enumerate().peekable();
+        for r in 0..starts.len() {
+            let end = starts.get(r + 1).copied().unwrap_or(usize::MAX);
+            let mut line = Vec::new();
+            while let Some((i, _)) = it.peek() {
+                if *i >= end {
+                    break;
+                }
+                if let Some((_, p)) = it.next() {
+                    // A line does not start with the space that followed the operator.
+                    if r > 0 && line.is_empty() && p.items.is_empty() && p.geo.is_empty() {
+                        continue;
+                    }
+                    line.push(p);
+                }
+            }
+            rows.push(MathBox::row(line));
+        }
+        let mut out = MathBox::default();
+        let mut dy = 0.0;
+        let mut prev_desc = 0.0;
+        for (r, row) in rows.into_iter().enumerate() {
+            if r > 0 {
+                dy += prev_desc + row.asc + 0.25 * sz;
+            }
+            prev_desc = row.desc;
+            out.put(row, 0.0, dy);
+        }
+        out
     }
 
     fn push_gap(&self, parts: &mut Vec<MathBox>, prev: Class, next: Class, st: St) {
@@ -560,6 +619,9 @@ impl Lay {
                     self.push_gap(parts, *prev, k, st);
                     marks.push((before, parts.len(), 0.5));
                     parts.push(self.text(&c.to_string(), Var::Italic, sz));
+                    if matches!(k, Class::Bin | Class::Rel) && self.path.is_empty() {
+                        self.brks.push(parts.len());
+                    }
                     *prev = k;
                 }
             }
@@ -602,20 +664,14 @@ impl Lay {
                     marks.push((parts.len(), parts.len(), 0.0));
                     return;
                 }
-                let k = if matches!(other, Node::Nary { .. }) { Class::Op } else { Class::Ord };
+                let k = if matches!(other, Node::Nary { .. } | Node::Limit { .. }) { Class::Op } else { Class::Ord };
                 let before = parts.len();
                 self.push_gap(parts, *prev, k, st);
                 marks.push((before, parts.len(), 0.5));
                 let b = self.structure(other, st, depth + 1, me);
-                if matches!(other, Node::Delim { .. }) {
-                    // Breathing room so `n(` and `)(` do not crowd.
-                    parts.push(MathBox::space(0.04 * sz));
-                    parts.push(b);
-                    parts.push(MathBox::space(0.04 * sz));
-                } else {
-                    parts.push(b);
-                }
-                *prev = Class::Ord;
+                parts.push(b);
+                // `lim`, like `sin`, takes a thin space before what follows.
+                *prev = if matches!(other, Node::Limit { .. }) { Class::Op } else { Class::Ord };
             }
         }
     }
@@ -671,7 +727,7 @@ impl Lay {
                     * if !display {
                         1.0
                     } else if integral {
-                        1.6
+                        2.4
                     } else {
                         1.75
                     };
@@ -1040,10 +1096,10 @@ impl Lay {
             }
             Some(self.rule_delim(c, big, sz).or_else(|| self.path_delim(c, big, sz)).unwrap_or_else(|| self.stretch(c, big, sz)))
         };
-        let mut parts = vec![MathBox::space(0.04 * sz)];
+        let mut parts = vec![];
         if let Some(o) = make(open) {
             parts.push(o);
-            parts.push(MathBox::space(0.05 * sz));
+            parts.push(MathBox::space(0.02 * sz));
         }
         let n = items.len();
         for (i, b) in items.into_iter().enumerate() {
@@ -1057,10 +1113,9 @@ impl Lay {
             }
         }
         if let Some(c) = make(close) {
-            parts.push(MathBox::space(0.05 * sz));
+            parts.push(MathBox::space(0.02 * sz));
             parts.push(c);
         }
-        parts.push(MathBox::space(0.03 * sz));
         MathBox::row(parts)
     }
 
@@ -1185,7 +1240,22 @@ impl Lay {
 
 /// Lay out an equation at `size` points in the family of `base` (bold when `bold`).
 pub(crate) fn layout_math(m: &Math, base: &FontFace, size: f64, bold: bool, display: bool) -> MathBox {
-    let mut lay = Lay { faces: Faces::new(&base.family), size: size.clamp(0.5, 4000.0), bold, budget: NODE_BUDGET, path: vec![], cur: 0 };
+    layout_math_wrapped(m, base, size, bold, display, f64::INFINITY)
+}
+
+/// [`layout_math`], breaking the top-level row into lines no wider than `max_w` where it can
+/// (after binary operators and relations first, between any two items when there is none).
+pub(crate) fn layout_math_wrapped(m: &Math, base: &FontFace, size: f64, bold: bool, display: bool, max_w: f64) -> MathBox {
+    let mut lay = Lay {
+        faces: Faces::new(&base.family),
+        size: size.clamp(0.5, 4000.0),
+        bold,
+        budget: NODE_BUDGET,
+        path: vec![],
+        cur: 0,
+        wrap: max_w,
+        brks: vec![],
+    };
     let st = if display { St::Display } else { St::Text };
     lay.seq(&m.body, st, 0)
 }
@@ -1283,7 +1353,7 @@ pub fn layout_equation(m: &Math, family: &str, size: f64, display: bool, color: 
     EqLayout { width: b.w + 2.0 * pad, height: asc + desc + 2.0 * pad, draws, geo }
 }
 
-type Key = (String, u32, u64, bool, bool);
+type Key = (String, u32, u64, bool, bool, u64);
 type Cached = (Arc<MathBox>, bool, Option<String>);
 static CACHE: Mutex<Option<HashMap<Key, Cached>>> = Mutex::new(None);
 
@@ -1297,12 +1367,12 @@ pub(crate) enum Src<'a> {
 /// The laid-out box for an equation, cached by (source, face, size, weight). Returns the box,
 /// whether the equation is display math (`solo` or an `m:oMathPara` source) and the paragraph
 /// justification of display math (`left`, `right`, `center`, ...).
-pub(crate) fn layout_cached(src: Src, base: &FontFace, size: f64, bold: bool, solo: bool) -> Cached {
+pub(crate) fn layout_cached(src: Src, base: &FontFace, size: f64, bold: bool, solo: bool, max_w: f64) -> Cached {
     let text = match src {
         Src::Omml(x) => format!("O{x}"),
         Src::Linear(x) => format!("L{x}"),
     };
-    let key: Key = (text, base.id(), size.to_bits(), bold, solo);
+    let key: Key = (text, base.id(), size.to_bits(), bold, solo, max_w.to_bits());
     if let Ok(g) = CACHE.lock()
         && let Some(hit) = g.as_ref().and_then(|c| c.get(&key))
     {
@@ -1313,7 +1383,7 @@ pub(crate) fn layout_cached(src: Src, base: &FontFace, size: f64, bold: bool, so
         Src::Linear(x) => wordcraft_math::from_linear(x),
     };
     let display = m.para || solo;
-    let val = (Arc::new(layout_math(&m, base, size, bold, display)), display, m.jc.clone());
+    let val = (Arc::new(layout_math_wrapped(&m, base, size, bold, display, max_w)), display, m.jc.clone());
     if let Ok(mut g) = CACHE.lock() {
         let c = g.get_or_insert_with(HashMap::new);
         if c.len() >= CACHE_MAX {
@@ -1327,7 +1397,7 @@ pub(crate) fn layout_cached(src: Src, base: &FontFace, size: f64, bold: bool, so
 /// The laid-out box for an OMML equation (see [`layout_cached`]).
 #[cfg(test)]
 pub(crate) fn layout_math_cached(omml: &str, base: &FontFace, size: f64, bold: bool, solo: bool) -> Arc<MathBox> {
-    layout_cached(Src::Omml(omml), base, size, bold, solo).0
+    layout_cached(Src::Omml(omml), base, size, bold, solo, f64::INFINITY).0
 }
 
 /// Number of cached equation layouts (tests).

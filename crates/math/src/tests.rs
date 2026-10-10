@@ -1135,3 +1135,14 @@ fn inherited_namespace_copies_are_charged_per_element() {
     let out = to_omml(&from_omml(&src));
     assert!(out.len() < 40 * 1024 * 1024, "{}", out.len());
 }
+
+#[test]
+fn nary_keeps_parentheses_around_a_sum_but_not_around_a_term() {
+    let m = from_linear("prod_(k=1)^n (1+1/k)");
+    assert!(matches!(m.body.as_slice(), [Node::Nary { body, .. }] if matches!(body.as_slice(), [Node::Delim { .. }])));
+    let m = from_linear("sum_(i=1)^n (x_i)");
+    assert!(matches!(m.body.as_slice(), [Node::Nary { body, .. }] if !matches!(body.as_slice(), [Node::Delim { .. }])));
+    // The typed form round-trips.
+    let lin = to_linear(&from_linear("prod_(k=1)^n (1+1/k)"));
+    assert_eq!(from_linear(&lin).body, from_linear("prod_(k=1)^n (1+1/k)").body);
+}

@@ -892,7 +892,19 @@ impl Parser {
             }
         }
         self.skip_ws();
-        let mut body = self.operand(true);
+        // `prod_(k=1)^n (1+1/k)`: a parenthesised sum or difference is the operand with its
+        // parentheses (dropping them would change the meaning); other groups follow the
+        // linear format and lose theirs (`sum_(i=1)^n (x_i)`).
+        let close = if self.peek() == Some('(') && self.depth < MAX_DEPTH { self.matching(self.pos, '(', ')') } else { None };
+        let keep = close.is_some_and(|m| self.has_top_level(self.pos + 1, m, &['+', '-', '\u{2212}', '=']));
+        let mut body = if keep {
+            match self.group() {
+                Some(inner) => vec![Node::Delim { open: "(".into(), close: ")".into(), sep: "|".into(), items: vec![inner] }],
+                None => self.operand(true),
+            }
+        } else {
+            self.operand(true)
+        };
         loop {
             // `sum_(i=1)^n 1/i`: a fraction in the body belongs to the sum.
             let save = self.pos;

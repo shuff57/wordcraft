@@ -497,13 +497,14 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
                             notes.push((b.clusters.len().saturating_sub(1), *id));
                         }
                         Some(InlineObject::Equation { linear, display, omml }) => {
-                            let maxw = (env.width - rp.indent_left.max(0.0) - rp.indent_right.max(0.0)).max(18.0);
+                            let maxw = (env.width - rp.indent_left.max(0.0) - rp.indent_right.max(0.0) - rp.indent_first.max(0.0)).max(18.0);
                             let base = wordcraft_fonts::word::resolve("Cambria Math", rc.bold, false).face;
                             let src = match omml {
                                 Some(x) => crate::math::Src::Omml(x),
                                 None => crate::math::Src::Linear(linear),
                             };
-                            let (bx, disp, jc) = crate::math::layout_cached(src, &base, rc.draw_size() as f64, rc.bold, *display);
+                            let (bx, disp, jc) =
+                                crate::math::layout_cached(src, &base, rc.draw_size() as f64, rc.bold, *display, maxw.max(36.0) as f64);
                             let w = (bx.width() as f32).clamp(0.0, 1e5);
                             let (adv, dx) = if disp {
                                 let adv = w.max(maxw);
@@ -888,7 +889,12 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u16, suffix: Opti
             }
             if let Some(st) = pl.styles.get(c.style as usize) {
                 let (a, d) = if matches!(c.kind, ClKind::Object(_)) && c.obj_h > 0.0 {
-                    (c.obj_h, pl.eq_at(c0 + k).map_or(0.0, |e| e.bx.descent() as f32))
+                    match pl.eq_at(c0 + k) {
+                        // Display math keeps clear of the lines around it.
+                        Some(e) if e.display => (c.obj_h + st.size * 0.45, e.bx.descent() as f32 + st.size * 0.45),
+                        Some(e) => (c.obj_h, e.bx.descent() as f32),
+                        None => (c.obj_h, 0.0),
+                    }
                 } else {
                     (st.ascent + st.shift.max(0.0), st.descent + (-st.shift).max(0.0))
                 };
@@ -941,7 +947,9 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u16, suffix: Opti
                 *v += shift;
             }
         }
-        let justify = (rp.align == Align::Justify && end == LineEnd::Wrap) || rp.align == Align::Distribute;
+        // The line before a display equation ends a sentence's run, so it is not stretched.
+        let before_display = pl.eq_at(c1).is_some_and(|e| e.display || e.bx.width() as f32 > 0.5 * (right_edge - left));
+        let justify = (rp.align == Align::Justify && end == LineEnd::Wrap && !before_display) || rp.align == Align::Distribute;
         if justify && slack > 0.0 {
             // Spaces inside the content (after the last tab).
             let spaces: Vec<usize> = (align_from..c1)
