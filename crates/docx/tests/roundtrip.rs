@@ -918,6 +918,8 @@ fn hostile_omml_never_corrupts_document_xml() {
         "\u{0}<m:oMath/>".to_string(),
         format!("<m:oMath xmlns:m=\"{m}\" a=\"1\" a=\"2\"/>"),
         format!("<m:oMath xmlns:m=\"{m}\" bad:attr=\"1\"/>"),
+        format!("<m:oMath xmlns:m=\"{m}\" xmlns:p=\"urn:a}}b\"><p:ext p:k=\"1\"/></m:oMath>"),
+        format!("<m:oMath xmlns:m=\"{m}\" xmlns:p=\"urn:}}{{x&lt;&quot;\"><p:ext p:k=\"1\"/></m:oMath>"),
     ];
     for h in hostile {
         let bytes = wordcraft_docx::write(&doc_with_omml(&h)).unwrap();

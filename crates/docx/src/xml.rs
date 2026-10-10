@@ -82,9 +82,10 @@ fn qualify(uri: &[u8]) -> Qual {
     }
 }
 
-/// Split a Clark-form name (`{uri}local`) into its parts.
+/// Split a Clark-form name (`{uri}local`) into its parts. The URI may itself contain `}`; an XML
+/// local name cannot, so split at the last one.
 fn clark(n: &str) -> Option<(&str, &str)> {
-    n.strip_prefix('{').and_then(|r| r.split_once('}'))
+    n.strip_prefix('{').and_then(|r| r.rsplit_once('}'))
 }
 
 #[derive(Clone, Debug, PartialEq)]
