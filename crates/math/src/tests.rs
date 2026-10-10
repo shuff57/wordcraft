@@ -1191,3 +1191,32 @@ fn latex_nary_operand_takes_the_whole_product() {
     let _ = from_linear(&"\\sum_".repeat(3000));
     let _ = from_linear(&"\\int\\,".repeat(3000));
 }
+
+#[test]
+fn braces_take_their_labels_as_limits() {
+    let m = from_linear(r"\underbrace{a+b}_{n}");
+    assert!(
+        matches!(m.body.as_slice(), [Node::Limit { lower: true, base, .. }] if matches!(base.as_slice(), [Node::GroupChr { top: false, .. }])),
+        "{:?}",
+        m.body
+    );
+    let m = from_linear(r"\overbrace{a+b}^{m}");
+    assert!(
+        matches!(m.body.as_slice(), [Node::Limit { lower: false, base, .. }] if matches!(base.as_slice(), [Node::GroupChr { top: true, .. }])),
+        "{:?}",
+        m.body
+    );
+    // Linear text spelling reads back as the same limit.
+    let again = from_linear(&to_linear(&from_linear(r"\underbrace{a+b}_{n}")));
+    assert!(matches!(again.body.as_slice(), [Node::Limit { lower: true, .. }]), "{:?}", again.body);
+    // The wrong side stays a script.
+    assert!(matches!(from_linear(r"\underbrace{a}^{2}").body.as_slice(), [Node::Script { .. }]));
+}
+
+#[test]
+fn prime_parallel_and_long_arrows_are_known() {
+    let m = from_linear(r"f\prime \parallel \overrightarrow{AB} \overleftarrow{CD}");
+    assert!(unknown_commands(&m).is_empty(), "{:?}", unknown_commands(&m));
+    assert!(m.body.iter().any(|n| matches!(n, Node::GroupChr { ch: '\u{2192}', top: true, .. })));
+    assert!(m.body.iter().any(|n| matches!(n, Node::GroupChr { ch: '\u{2190}', top: true, .. })));
+}

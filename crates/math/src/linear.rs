@@ -100,6 +100,12 @@ const SYMS: &[(&str, &str)] = &[
     ("degree", "°"),
     ("angle", "∠"),
     ("perp", "⊥"),
+    ("parallel", "∥"),
+    ("nparallel", "∦"),
+    ("prime", "′"),
+    ("dprime", "″"),
+    ("backprime", "‵"),
+    ("mid", "∣"),
     ("propto", "∝"),
     ("ll", "≪"),
     ("gg", "≫"),
@@ -536,7 +542,23 @@ impl Parser {
                     push_node(out, n);
                 }
             }
-            "widehat" | "widetilde" | "overrightarrow" | "vec" | "hat" | "tilde" | "bar" | "dot" | "ddot" | "breve" | "check" | "acute" | "grave"
+            "overrightarrow" | "overleftarrow" | "overleftrightarrow" | "underrightarrow" | "underleftarrow" | "underleftrightarrow"
+                if {
+                    self.skip_ws();
+                    self.peek().is_some()
+                } =>
+            {
+                let body = self.brace_arg();
+                let ch = if w.ends_with("leftrightarrow") {
+                    '\u{2194}'
+                } else if w.ends_with("rightarrow") {
+                    '\u{2192}'
+                } else {
+                    '\u{2190}'
+                };
+                out.push(Node::GroupChr { ch, top: w.starts_with("over"), body });
+            }
+            "widehat" | "widetilde" | "vec" | "hat" | "tilde" | "bar" | "dot" | "ddot" | "breve" | "check" | "acute" | "grave"
                 if {
                     self.skip_ws();
                     self.peek().is_some()
@@ -545,7 +567,6 @@ impl Parser {
                 let name = match w.as_str() {
                     "widehat" => "hat",
                     "widetilde" => "tilde",
-                    "overrightarrow" => "vec",
                     o => o,
                 };
                 let body = self.brace_arg();
@@ -915,6 +936,17 @@ impl Parser {
                         _ => return None,
                     };
                     return Some(Node::Delim { open: "{".into(), close: String::new(), sep: "|".into(), items: vec![vec![a]] });
+                }
+                "overrightarrow" | "overleftarrow" | "overleftrightarrow" | "underrightarrow" | "underleftarrow" | "underleftrightarrow" => {
+                    let body = self.group()?;
+                    let ch = if w.ends_with("leftrightarrow") {
+                        '\u{2194}'
+                    } else if w.ends_with("rightarrow") {
+                        '\u{2192}'
+                    } else {
+                        '\u{2190}'
+                    };
+                    return Some(Node::GroupChr { ch, top: w.starts_with("over"), body });
                 }
                 "overline" | "underline" => {
                     let body = self.group()?;
@@ -1331,6 +1363,14 @@ fn attach_script(out: &mut Seq, sup: bool, operand: Seq) {
             return;
         }
     }
+    // A script on an over/under brace (or arrow) is its label, centred beyond the mark.
+    if let Some(Node::GroupChr { top, .. }) = out.last()
+        && *top == sup
+    {
+        let base = pop_base(out);
+        out.push(Node::Limit { lower: !sup, base, lim: operand });
+        return;
+    }
     let base = pop_base(out);
     let (sub, sup_v) = if sup { (None, Some(operand)) } else { (Some(operand), None) };
     out.push(Node::Script { base, sub, sup: sup_v });
@@ -1540,8 +1580,10 @@ fn seq(out: &mut String, s: &Seq, depth: usize) {
                     out.push_str(&b);
                     out.push('_');
                 } else {
-                    // No linear spelling for other bases: print it as a script.
-                    out.push_str(&paren(b.clone(), base_atomic(&b)));
+                    // No linear spelling for other bases: print it as a script. An over/under
+                    // brace or arrow is already a call, so it needs no parentheses.
+                    let marked = matches!(base.as_slice(), [Node::GroupChr { top, .. }] if *top != *lower);
+                    out.push_str(&if marked { b.clone() } else { paren(b.clone(), base_atomic(&b)) });
                     out.push(if *lower { '_' } else { '^' });
                 }
                 out.push_str(&paren(t, a));
@@ -1556,6 +1598,9 @@ fn seq(out: &mut String, s: &Seq, depth: usize) {
             }
             Node::Bar { top, body } => out.push_str(&format!("{}({})", if *top { "overline" } else { "underline" }, lin(body, d))),
             Node::GroupChr { ch, top, body } => match (*ch, *top) {
+                ('\u{2192}', t) => out.push_str(&format!("{}rightarrow({})", if t { "over" } else { "under" }, lin(body, d))),
+                ('\u{2190}', t) => out.push_str(&format!("{}leftarrow({})", if t { "over" } else { "under" }, lin(body, d))),
+                ('\u{2194}', t) => out.push_str(&format!("{}leftrightarrow({})", if t { "over" } else { "under" }, lin(body, d))),
                 ('\u{23DE}', true) => out.push_str(&format!("overbrace({})", lin(body, d))),
                 ('\u{23DF}', false) => out.push_str(&format!("underbrace({})", lin(body, d))),
                 _ => out.push_str(&lin(body, d)),

@@ -415,6 +415,16 @@ mod tests {
     }
 
     #[test]
+    fn brace_labels_are_limits_in_the_stored_omml() {
+        let mut s = session();
+        let r = s.run("equation.fromLinear", &json!({"linear": "\\underbrace{a+b}_{n} \\overrightarrow{AB} f\\prime"})).unwrap();
+        let o = r["omml"].as_str().unwrap();
+        assert!(o.contains("<m:limLow>") && o.contains("<m:groupChr>"), "{o}");
+        assert!(!o.contains("<m:sSub>"), "{o}");
+        assert!(r["warnings"].as_array().unwrap().is_empty(), "{r}");
+    }
+
+    #[test]
     fn default_equation_is_pythagoras() {
         let mut s = session();
         s.run("insert.equation", &json!({})).unwrap();

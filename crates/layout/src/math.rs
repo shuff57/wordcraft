@@ -344,6 +344,26 @@ fn add_segment(p: &mut BezPath, a: (f64, f64), b: (f64, f64), w: f64, ext: bool)
     add_poly(p, &[(a.0 + nx, a.1 + ny), (b.0 + nx, b.1 + ny), (b.0 - nx, b.1 - ny), (a.0 - nx, a.1 - ny)]);
 }
 
+/// Narrow a box made of one glyph run to its ink's right edge (plus a little), so scripts hang
+/// by the glyph rather than by its side bearing.
+fn trim_right(mut b: MathBox, sz: f64) -> MathBox {
+    let mut right: f64 = 0.0;
+    for it in &b.items {
+        if let Item::Glyphs(g) = it {
+            let k = g.size / g.face.upem.max(1.0);
+            for (gid, x, _) in &g.glyphs {
+                if let Some((_, _, x1, _)) = ink(&g.face, *gid) {
+                    right = right.max(x + x1 * k);
+                }
+            }
+        }
+    }
+    if right > 0.0 && right + 0.03 * sz < b.w {
+        b.w = right + 0.03 * sz;
+    }
+    b
+}
+
 /// A parenthesis from `top` to `bot` (y down): a crescent that is thickest in the middle and
 /// never thinner than a hairline at the tips. `x` is the tip column; the belly bulges left for an
 /// opening parenthesis and right for a closing one.
@@ -830,11 +850,12 @@ impl Lay {
                     * if !display {
                         1.0
                     } else if integral {
-                        2.9
+                        2.5
                     } else {
                         1.75
                     };
                 let ob = self.big_op(*op, display, sz).unwrap_or_else(|| self.stretch(*op, opsz * 0.85, opsz));
+                let ob = if integral { trim_right(ob, sz) } else { ob };
                 let sb = sub.as_ref().map(|s| self.child(me, 0, s, st.script(), depth));
                 let sp = sup.as_ref().map(|s| self.child(me, usize::from(sub.is_some()), s, st.script(), depth));
                 self.nary_body = true;
@@ -901,10 +922,21 @@ impl Lay {
             }
             Node::GroupChr { ch, top, body } => {
                 let b = self.child(me, 0, body, st, depth);
-                let t = (0.05 * sz).max(0.4);
                 let (w, asc, desc) = (b.w, b.asc, b.desc);
+                let gap = 0.1 * sz;
                 let mut out = MathBox::default();
                 out.put(b, 0.0, 0.0);
+                if let Some(g) = self.group_shape(*ch, w, sz, *top) {
+                    // The shape has its near edge at its origin and grows away from the text.
+                    if *top {
+                        out.put(g, 0.0, -(asc + gap));
+                    } else {
+                        out.put(g, 0.0, desc + gap);
+                    }
+                    out.w = out.w.max(w);
+                    return out;
+                }
+                let t = (0.05 * sz).max(0.4);
                 let g = self.text(&ch.to_string(), Var::Upright, sz * 0.8);
                 let gw = g.w;
                 if *top {
@@ -1084,6 +1116,67 @@ impl Lay {
         }
         out.w = w + 0.1 * sz;
         out
+    }
+
+    /// A stretchy grouping mark drawn across `w`: a brace or an arrow. Its origin is the edge
+    /// nearest the text; it grows downward for an under-mark and upward for an over-mark.
+    fn group_shape(&self, ch: char, w: f64, sz: f64, top: bool) -> Option<MathBox> {
+        let t = (self.hbar(sz) * 1.1).max(0.045 * sz);
+        let w = w.max(0.5 * sz);
+        let mut b = MathBox::default();
+        match ch {
+            '\u{23DE}' | '\u{23DF}' | '\u{23B4}' | '\u{23B5}' => {
+                let h = 0.4 * sz;
+                let r = (h / 2.0).min(w / 4.0 - t).max(0.02 * sz);
+                let (y0, ym) = (t / 2.0, t / 2.0 + r);
+                let hw = w / 2.0;
+                let mut cl = BezPath::new();
+                let k = 0.5523 * r;
+                cl.move_to((t / 2.0, y0));
+                cl.curve_to((t / 2.0, y0 + k), (t / 2.0 + r - k, ym), (t / 2.0 + r, ym));
+                cl.line_to((hw - r, ym));
+                cl.curve_to((hw - r + k, ym), (hw, ym + r - k), (hw, ym + r));
+                cl.curve_to((hw, ym + r - k), (hw + r - k, ym), (hw + r, ym));
+                cl.line_to((w - t / 2.0 - r, ym));
+                cl.curve_to((w - t / 2.0 - r + k, ym), (w - t / 2.0, y0 + k), (w - t / 2.0, y0));
+                let stroke = kurbo::Stroke::new(t).with_caps(kurbo::Cap::Butt).with_join(kurbo::Join::Round);
+                b.path(kurbo::stroke(cl.elements().iter().copied(), &stroke, &kurbo::StrokeOpts::default(), 0.05));
+                // Keep the full height even if the stroke bounds are a hair smaller.
+                b.asc = 0.0;
+                b.desc = 2.0 * r + t;
+                b.w = w;
+            }
+            '\u{2192}' | '\u{2190}' | '\u{2194}' => {
+                let head = 0.26 * sz;
+                let y = 0.17 * sz + t;
+                let (x0, x1) = (0.02 * sz, w - 0.02 * sz);
+                let mut p = BezPath::new();
+                add_segment(&mut p, (x0, y), (x1, y), t, false);
+                if ch != '\u{2190}' {
+                    add_segment(&mut p, (x1, y), (x1 - head, y - 0.17 * sz), t, true);
+                    add_segment(&mut p, (x1, y), (x1 - head, y + 0.17 * sz), t, true);
+                }
+                if ch != '\u{2192}' {
+                    add_segment(&mut p, (x0, y), (x0 + head, y - 0.17 * sz), t, true);
+                    add_segment(&mut p, (x0, y), (x0 + head, y + 0.17 * sz), t, true);
+                }
+                b.path(p);
+                b.asc = 0.0;
+                b.desc = 2.0 * y;
+                b.w = w;
+            }
+            _ => return None,
+        }
+        if top {
+            // Mirror about the near edge so the ends point down at the text.
+            for it in &mut b.items {
+                if let Item::Path(p) = it {
+                    p.apply_affine(Affine::new([1.0, 0.0, 0.0, -1.0, 0.0, 0.0]));
+                }
+            }
+            std::mem::swap(&mut b.asc, &mut b.desc);
+        }
+        Some(b)
     }
 
     /// Summation and product signs drawn as shapes, heavy and square like a typeset display
@@ -1390,9 +1483,25 @@ pub(crate) fn layout_math(m: &Math, base: &FontFace, size: f64, bold: bool, disp
 /// [`layout_math`], breaking the top-level row into lines no wider than `max_w` where it can
 /// (after binary operators and relations first, between any two items when there is none).
 pub(crate) fn layout_math_wrapped(m: &Math, base: &FontFace, size: f64, bold: bool, display: bool, max_w: f64) -> MathBox {
+    let mut cur = size.clamp(0.5, 4000.0);
+    let floor = cur * 0.3;
+    let mut out = lay_once(m, base, cur, bold, display, max_w);
+    // Something unbreakable (a wide matrix) that still overflows the line: shrink it to fit,
+    // rather than letting the page clip it.
+    for _ in 0..3 {
+        if !(max_w.is_finite() && max_w > 0.0 && out.w > max_w * 1.001 && cur > floor) {
+            break;
+        }
+        cur = (cur * max_w / out.w * 0.98).max(floor);
+        out = lay_once(m, base, cur, bold, display, max_w);
+    }
+    out
+}
+
+fn lay_once(m: &Math, base: &FontFace, size: f64, bold: bool, display: bool, max_w: f64) -> MathBox {
     let mut lay = Lay {
         faces: Faces::new(&base.family),
-        size: size.clamp(0.5, 4000.0),
+        size,
         bold,
         budget: NODE_BUDGET,
         path: vec![],
@@ -1928,5 +2037,45 @@ mod tests {
         assert!(b.asc > 30.0);
         let one = layout_math_wrapped(&m, &face(), 20.0, false, false, f64::INFINITY);
         assert!(one.last_line_width().is_none());
+    }
+
+    #[test]
+    fn braces_span_the_operand_and_the_label_is_centred() {
+        let body = lay("a+b+c+d", false);
+        let b = lay(r"\underbrace{a+b+c+d}_{n}", false);
+        assert_eq!(b.paths(), 1, "one drawn brace, no separate rule");
+        assert_eq!(b.rules(), 0);
+        let brace = b.items.iter().find_map(|i| if let Item::Path(p) = i { Some(p.bounding_box()) } else { None }).expect("brace");
+        assert!((brace.width() - body.w).abs() < 0.1 * body.w, "brace {} vs operand {}", brace.width(), body.w);
+        // The label sits below the brace, centred.
+        let label = b.items.iter().rev().find_map(|i| if let Item::Glyphs(g) = i { g.glyphs.first().copied() } else { None }).expect("label");
+        assert!(label.2 > brace.y1 - 0.5, "label below the brace");
+        assert!((label.1 - body.w / 2.0).abs() < 0.15 * body.w);
+        let o = lay(r"\overbrace{a+b}^{m}", false);
+        assert!(o.asc > lay("a+b", false).asc + 5.0, "label above the brace");
+    }
+
+    #[test]
+    fn arrows_over_a_base_span_the_whole_base() {
+        let b = lay(r"\overrightarrow{AB}", false);
+        let base = lay("AB", false);
+        let p = b.items.iter().find_map(|i| if let Item::Path(p) = i { Some(p.bounding_box()) } else { None }).expect("arrow");
+        assert!(p.width() > 0.9 * base.w, "arrow {} vs base {}", p.width(), base.w);
+    }
+
+    #[test]
+    fn a_wide_unbreakable_matrix_is_shrunk_to_the_line() {
+        let row = (0..30).map(|j| format!("a_{j}")).collect::<Vec<_>>().join("&");
+        let m = from_linear(&format!("matrix({row})"));
+        let free = layout_math_wrapped(&m, &face(), 20.0, false, true, f64::INFINITY);
+        assert!(free.w > 468.0);
+        let fit = layout_math_wrapped(&m, &face(), 20.0, false, true, 468.0);
+        assert!(fit.w <= 468.0 * 1.01, "{}", fit.w);
+    }
+
+    #[test]
+    fn a_display_integral_is_about_two_em_and_hugs_its_limit() {
+        let b = lay(r"\oint_C f", true);
+        assert!(b.asc + b.desc < 2.9 * 20.0, "{}", b.asc + b.desc);
     }
 }
