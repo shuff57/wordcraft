@@ -489,3 +489,49 @@ pub fn parse(xml: &str) -> Vec<XEl> {
     }
     roots
 }
+
+/// Strict check used before treating outside text (a clipboard paste) as markup: one root
+/// element, balanced and matching tags, well-formed attributes, no text outside the root, at most
+/// [`XML_DEPTH`] levels and [`MAX_NODES`] elements. [`parse`] stays lenient; this says whether
+/// the lenient result is the whole document.
+pub fn well_formed(src: &str) -> Result<(), &'static str> {
+    let mut reader = Reader::from_str(src);
+    let (mut depth, mut roots, mut nodes) = (0usize, 0usize, 0usize);
+    let attrs_ok = |b: &BytesStart| b.attributes().all(|a| a.is_ok());
+    loop {
+        let ev = reader.read_event().map_err(|_| "malformed XML")?;
+        match ev {
+            Event::Eof => break,
+            Event::Start(b) | Event::Empty(b) if !attrs_ok(&b) => return Err("malformed attribute"),
+            Event::Start(_) => {
+                roots += usize::from(depth == 0);
+                depth += 1;
+                nodes += 1;
+                if depth > XML_DEPTH {
+                    return Err("nested too deeply");
+                }
+            }
+            Event::Empty(_) => {
+                roots += usize::from(depth == 0);
+                nodes += 1;
+            }
+            Event::End(_) => depth = depth.checked_sub(1).ok_or("unbalanced end tag")?,
+            Event::Text(t) if depth == 0 && !t.iter().all(u8::is_ascii_whitespace) => return Err("text outside the root element"),
+            Event::CData(_) | Event::GeneralRef(_) if depth == 0 => return Err("text outside the root element"),
+            _ => {}
+        }
+        if nodes > MAX_NODES {
+            return Err("too many elements");
+        }
+        if roots > 1 {
+            return Err("more than one root element");
+        }
+    }
+    if depth != 0 {
+        return Err("unclosed element");
+    }
+    if roots != 1 {
+        return Err("no root element");
+    }
+    Ok(())
+}

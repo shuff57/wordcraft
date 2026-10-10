@@ -1,19 +1,24 @@
 //! WordCraft equations: the math tree, OMML (Office Math Markup) import and export, a typed
-//! "linear" text format, and the template palette.
+//! "linear" text format, the template palette, presentation MathML import and recognition of
+//! pasted equations.
 //!
 //! Layer 1, no dependency on the model or fonts: layout lives in `wordcraft-layout`.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+mod clip;
 mod edit;
 mod linear;
+mod mathml;
 mod omml;
 mod templates;
 mod xml;
 pub(crate) use xml::XML_DEPTH;
 
+pub use clip::{ClipKind, MAX_LATEX, MAX_MARKUP, equation_from_clipboard};
 pub use edit::{Caret, Editor, Key, Path, children, children_mut, seq_at, seq_at_mut, units};
 pub use linear::{from_linear, to_linear, unknown_commands};
+pub use mathml::{MATHML_NS, MAX_MATHML, from_mathml};
 pub use omml::{OMATH_BREAK, OMML_NS, from_omml, to_omml};
 pub use templates::{Template, template, templates};
 

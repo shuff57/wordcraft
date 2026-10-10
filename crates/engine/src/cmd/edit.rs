@@ -77,7 +77,23 @@ fn paste(s: &mut Session, v: &Value) -> CmdResult {
     // An explicit text param (from the system clipboard) wins unless it matches our own copy.
     let frag = match (p::str(v, "text"), &s.clipboard) {
         (Some(t), Some(f)) if f.plain_text() == t.replace("\r\n", "\n") => f.clone(),
-        (Some(t), _) => Fragment::from_text(&t.replace("\r\n", "\n")),
+        (Some(t), _) => {
+            // One whole equation (OMML, MathML or delimited LaTeX) pastes as an equation; one that
+            // does not parse pastes as the text it is, with a note in the status bar.
+            match wordcraft_math::equation_from_clipboard(t) {
+                Some((kind, Ok(m))) => {
+                    let mut r = super::equation::insert_math(s, &m)?;
+                    if let Some(o) = r.as_object_mut() {
+                        o.insert("pasted".into(), json!("equation"));
+                        o.insert("format".into(), json!(kind.name()));
+                    }
+                    return Ok(r);
+                }
+                Some((kind, Err(why))) => s.status = format!("Pasted as text: the {} equation could not be read ({why}).", kind.name()),
+                None => {}
+            }
+            Fragment::from_text(&t.replace("\r\n", "\n"))
+        }
         (None, Some(f)) => f.clone(),
         (None, None) => return Err(CmdError::Failed("the clipboard is empty".into())),
     };

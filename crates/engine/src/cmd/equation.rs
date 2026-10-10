@@ -122,7 +122,12 @@ fn payload(m: &Math) -> (String, String) {
 
 fn insert_equation(s: &mut Session, p: &Value) -> CmdResult {
     let m = math_param(p, Some("a^2+b^2=c^2"))?;
-    let (omml, linear) = payload(&m);
+    insert_math(s, &m)
+}
+
+/// Insert an equation object in place of the selection (tracked when Track Changes is on).
+pub(crate) fn insert_math(s: &mut Session, m: &Math) -> CmdResult {
+    let (omml, linear) = payload(m);
     let mut props = s.typing_props();
     let at = delete_selection(s)?;
     if s.doc.settings.track_changes {
@@ -135,7 +140,7 @@ fn insert_equation(s: &mut Session, p: &Value) -> CmdResult {
     let obj = InlineObject::Equation { linear: linear.clone(), display: m.para, omml: Some(omml.clone()) };
     let end = s.doc.insert_object(&at, obj, &props)?;
     s.sel = Selection::caret(end);
-    Ok(json!({"pos": pos_json(&at), "omml": omml, "linear": linear, "display": m.para, "warnings": warnings(&m)}))
+    Ok(json!({"pos": pos_json(&at), "omml": omml, "linear": linear, "display": m.para, "warnings": warnings(m)}))
 }
 
 /// Every equation in the body, in document order, as (position of its object character, object).
@@ -667,6 +672,170 @@ mod tests {
                     s.clamp_selection();
                     let _ = s.layout();
                 }
+            }
+        }
+    }
+
+    /// The exact text the equaSHion tool put on the clipboard for the quadratic formula.
+    const QUADRATIC_OMML: &str = "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><m:r><m:t xml:space=\"preserve\">x=</m:t></m:r><m:f><m:num><m:r><m:t xml:space=\"preserve\">−b±</m:t></m:r><m:rad><m:radPr><m:degHide m:val=\"1\"/></m:radPr><m:deg></m:deg><m:e><m:sSup><m:e><m:r><m:t xml:space=\"preserve\">b</m:t></m:r></m:e><m:sup><m:r><m:t xml:space=\"preserve\">2</m:t></m:r></m:sup></m:sSup><m:r><m:t xml:space=\"preserve\">−4ac</m:t></m:r></m:e></m:rad></m:num><m:den><m:r><m:t xml:space=\"preserve\">2a</m:t></m:r></m:den></m:f></m:oMath>";
+
+    const QUADRATIC_MATHML: &str = "<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"block\"><mi>x</mi><mo>=</mo><mfrac><mrow><mo>−</mo><mi>b</mi><mo>±</mo><msqrt><msup><mi>b</mi><mn>2</mn></msup><mo>−</mo><mn>4</mn><mi>a</mi><mi>c</mi></msqrt></mrow><mrow><mn>2</mn><mi>a</mi></mrow></mfrac></math>";
+
+    fn body_text(s: &Session) -> String {
+        s.doc.para_paths(StoryRef::Body).iter().filter_map(|p| s.doc.para(StoryRef::Body, p)).map(|p| p.text.clone()).collect::<Vec<_>>().join("\n")
+    }
+
+    fn equation_count(s: &Session) -> usize {
+        s.doc
+            .para_paths(StoryRef::Body)
+            .iter()
+            .filter_map(|p| s.doc.para(StoryRef::Body, p))
+            .map(|p| p.objects.iter().filter(|o| matches!(o, InlineObject::Equation { .. })).count())
+            .sum()
+    }
+
+    /// The first equation's tree as the `equation.get` command reports it.
+    fn tree(s: &mut Session) -> Value {
+        s.run("equation.get", &json!({"index": 0})).unwrap()
+    }
+
+    fn has_node(v: &Value, kind: &str) -> bool {
+        match v {
+            Value::Object(o) => o.contains_key(kind) || o.values().any(|x| has_node(x, kind)),
+            Value::Array(a) => a.iter().any(|x| has_node(x, kind)),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn pasting_the_equashion_omml_inserts_an_equation_in_one_undo_step() {
+        let mut s = session();
+        s.run("text.insert", &json!({"text": "Roots: "})).unwrap();
+        let before = body_text(&s);
+        let r = s.run("edit.paste", &json!({"text": QUADRATIC_OMML})).unwrap();
+        assert_eq!(r["pasted"], "equation");
+        assert_eq!(r["format"], "OMML");
+        assert_eq!(equation_count(&s), 1);
+        assert!(!body_text(&s).contains("oMath"), "no markup pasted as text");
+        let g = tree(&mut s);
+        assert!(has_node(&g["tree"], "Frac") && has_node(&g["tree"], "Rad") && has_node(&g["tree"], "Script"), "{g}");
+        assert_eq!(g["display"], false);
+        assert_eq!(g["linear"].as_str().unwrap().replace(' ', ""), "x=(−b±√(b^2−4ac))/2a".replace(' ', ""), "{g}");
+        s.run("edit.undo", &json!({})).unwrap();
+        assert_eq!(equation_count(&s), 0);
+        assert_eq!(body_text(&s), before, "one undo removes the pasted equation and nothing else");
+        s.run("edit.redo", &json!({})).unwrap();
+        assert_eq!(equation_count(&s), 1);
+    }
+
+    #[test]
+    fn pasting_omml_with_header_and_crlf_and_para_root() {
+        let mut s = session();
+        let text = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<m:oMathPara xmlns:m=\"{NS}\">{}</m:oMathPara>\r\n",
+            QUADRATIC_OMML.replacen(&format!(" xmlns:m=\"{NS}\""), "", 1)
+        );
+        let r = s.run("edit.paste", &json!({"text": text})).unwrap();
+        assert_eq!(r["pasted"], "equation");
+        assert_eq!(tree(&mut s)["display"], true);
+    }
+
+    #[test]
+    fn pasting_mathml_and_delimited_latex_inserts_equations() {
+        let mut s = session();
+        let r = s.run("edit.paste", &json!({"text": QUADRATIC_MATHML})).unwrap();
+        assert_eq!(r["format"], "MathML");
+        let g = tree(&mut s);
+        assert!(has_node(&g["tree"], "Frac") && has_node(&g["tree"], "Rad"), "{g}");
+        assert_eq!(g["display"], true);
+        s.run("edit.undo", &json!({})).unwrap();
+        assert_eq!(equation_count(&s), 0);
+        for (text, display) in [
+            ("$x=\\frac{-b\\pm\\sqrt{b^2-4ac}}{2a}$", false),
+            ("\\(x=\\frac{-b\\pm\\sqrt{b^2-4ac}}{2a}\\)", false),
+            ("$$x=\\frac{-b\\pm\\sqrt{b^2-4ac}}{2a}$$", true),
+            ("\\[x=\\frac{-b\\pm\\sqrt{b^2-4ac}}{2a}\\]", true),
+        ] {
+            let mut s = session();
+            let r = s.run("edit.paste", &json!({"text": text})).unwrap();
+            assert_eq!(r["format"], "LaTeX", "{text}");
+            let g = tree(&mut s);
+            assert!(has_node(&g["tree"], "Frac") && has_node(&g["tree"], "Rad"), "{text}: {g}");
+            assert_eq!(g["display"], display, "{text}");
+            assert_eq!(body_text(&s).chars().count(), 1, "only the equation object: {text}");
+        }
+    }
+
+    #[test]
+    fn plain_text_keep_text_only_and_malformed_markup_stay_text() {
+        for text in ["hello world", "costs $5 and $6", "a \\frac{1}{2} b", "\\alpha", "<b>bold</b>"] {
+            let mut s = session();
+            s.run("edit.paste", &json!({"text": text})).unwrap();
+            assert_eq!(equation_count(&s), 0, "{text}");
+            assert_eq!(body_text(&s), text);
+        }
+        // Keep Text Only pastes the markup itself.
+        for text in [QUADRATIC_OMML, QUADRATIC_MATHML, "$x^2$"] {
+            let mut s = session();
+            s.run("edit.pasteText", &json!({"text": text})).unwrap();
+            assert_eq!(equation_count(&s), 0);
+            assert_eq!(body_text(&s), text);
+        }
+        // Broken OMML / MathML: the clipboard is pasted as text, with a note.
+        let truncated = QUADRATIC_OMML.trim_end_matches("</m:oMath>");
+        for text in [truncated, "<m:oMath/>", "<m:oMath xmlns:m=\"urn:x\"><m:r><m:t>a</m:t></m:r></m:oMath>", "<math><mi>x</mi>", "<math></math>"] {
+            let mut s = session();
+            s.status.clear();
+            let r = s.run("edit.paste", &json!({"text": text})).unwrap();
+            assert!(r.get("pasted").is_none(), "{text}");
+            assert_eq!(equation_count(&s), 0, "{text}");
+            assert_eq!(body_text(&s), text);
+            assert!(s.status.starts_with("Pasted as text"), "{}", s.status);
+            s.run("edit.undo", &json!({})).unwrap();
+            assert_eq!(body_text(&s), "");
+        }
+    }
+
+    #[test]
+    fn pasted_equation_is_a_tracked_insertion_with_track_changes_on() {
+        let mut s = session();
+        s.doc.settings.track_changes = true;
+        s.run("edit.paste", &json!({"text": QUADRATIC_OMML})).unwrap();
+        let p = s.doc.para(StoryRef::Body, &wordcraft_doc::Path(vec![0])).unwrap();
+        let (_, props) = p.run_ranges().find(|(r, _)| p.text.get(r.clone()).is_some_and(|t| t.contains('\u{FFFC}'))).unwrap();
+        assert!(props.ins.is_some(), "tracked as an insertion");
+    }
+
+    #[test]
+    fn hostile_mathml_and_omml_pastes_never_panic_and_keep_the_text() {
+        let deep = format!("<math>{}<mi>x</mi>{}</math>", "<mrow>".repeat(5000), "</mrow>".repeat(5000));
+        let deep_frac = format!("<math>{}<mi>x</mi>{}</math>", "<mfrac><mi>a</mi>".repeat(200), "</mfrac>".repeat(200));
+        let wide = format!("<math>{}</math>", "<mi>x</mi>".repeat(200_000));
+        let deep_omml = format!("<m:oMath xmlns:m=\"{NS}\">{}{}</m:oMath>", "<m:f><m:num>".repeat(5000), "</m:num></m:f>".repeat(5000));
+        let cases = [
+            deep,
+            deep_frac,
+            wide,
+            deep_omml,
+            "<math><mi a=\"1\" a=\"2\">x</mi></math>".into(),
+            "<math><mi>x</mi></math><math><mi>y</mi></math>".into(),
+            "<math xmlns=\"urn:evil\"><mi>x</mi></math>".into(),
+            "<math><mfrac/><mroot/><msubsup/><munderover/><mtable><mtr/></mtable><mfenced/><mmultiscripts/></math>".into(),
+            "<math><mo>(</mo><mo>(</mo><mo>)</mo></math>".into(),
+            "<math><mspace width=\"1e400em\"/></math>".into(),
+            "$\\frac{".into(),
+            format!("${}$", "{".repeat(20_000)),
+        ];
+        for text in &cases {
+            for tracked in [false, true] {
+                let mut s = session();
+                s.doc.settings.track_changes = tracked;
+                let r = s.run("edit.paste", &json!({"text": text}));
+                assert!(r.is_ok(), "{:.60}: {r:?}", text);
+                if equation_count(&s) == 0 {
+                    assert_eq!(body_text(&s), *text, "the clipboard is never lost");
+                }
+                let _ = s.layout();
             }
         }
     }
