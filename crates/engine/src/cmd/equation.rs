@@ -600,6 +600,10 @@ mod tests {
         let r = s.run("equation.type", &json!({"input": ["a/", "b", "<Right>", "+", "sqrt", "x", "<Right>", "alpha"]})).unwrap();
         let l = r["linear"].as_str().unwrap().replace(' ', "");
         assert!(l.contains('√') && l.contains('α') && l.contains('/'), "{l}");
+        // Typed LaTeX is understood like the linear text is.
+        let r = s.run("equation.type", &json!({"input": ["\\frac{a}{b}", "+", "\\alpha", "\\lim_{x\\to0}"]})).unwrap();
+        let l = r["linear"].as_str().unwrap().replace(' ', "");
+        assert!(l.starts_with("a/b+α") && !l.contains("\\") && !l.contains("()_"), "{l}");
         let r = s.run("equation.type", &json!({"linear": "ab", "input": ["<Shift+Left>"]})).unwrap();
         assert_eq!(r["selection"], json!([1, 2]));
         assert!(s.doc.para(StoryRef::Body, &wordcraft_doc::Path(vec![0])).unwrap().objects.is_empty(), "equation.type is a query");

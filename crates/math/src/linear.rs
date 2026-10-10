@@ -144,6 +144,51 @@ fn double_struck(c: char) -> char {
 const NARY: &[(&str, char)] =
     &[("sum", '∑'), ("prod", '∏'), ("int", '∫'), ("iint", '∬'), ("iiint", '∭'), ("oint", '∮'), ("bigcup", '⋃'), ("bigcap", '⋂')];
 
+/// The single character a LaTeX-style symbol or Greek name stands for (`alpha`, `leq`), if any.
+pub(crate) fn symbol(name: &str) -> Option<char> {
+    if let Some((_, c)) = GREEK.iter().find(|(n, _)| *n == name) {
+        return Some(*c);
+    }
+    let (_, v) = SYMS.iter().find(|(n, _)| *n == name)?;
+    let mut it = v.chars();
+    let c = it.next()?;
+    it.next().is_none().then_some(c)
+}
+
+/// The big operator a name stands for (`sum`, `int`) and whether it takes limits above and below.
+pub(crate) fn nary_op(name: &str) -> Option<(char, bool)> {
+    let (_, c) = NARY.iter().find(|(n, _)| *n == name)?;
+    Some((*c, matches!(name, "sum" | "prod" | "bigcup" | "bigcap")))
+}
+
+/// The accent a name stands for (`hat`, `vec`).
+pub(crate) fn accent(name: &str) -> Option<char> {
+    ACCENTS.iter().find(|(n, _)| *n == name).map(|(_, c)| *c)
+}
+
+/// True for an upright function name (`sin`, `lim`, `max`) and for the operator words that print
+/// as plain text (`arg`, `mod`).
+pub(crate) fn is_function_word(name: &str) -> bool {
+    FUNCS.contains(&name) || PASS.contains(&name)
+}
+
+/// True when `name` is a function that takes a bare argument (`sin x`).
+pub(crate) fn is_bare_func(name: &str) -> bool {
+    BARE_FUNCS.contains(&name)
+}
+
+/// Every command name the typed-LaTeX table knows, for prefix checks.
+pub(crate) fn command_names() -> impl Iterator<Item = &'static str> {
+    GREEK
+        .iter()
+        .map(|(n, _)| *n)
+        .chain(SYMS.iter().map(|(n, _)| *n))
+        .chain(NARY.iter().map(|(n, _)| *n))
+        .chain(ACCENTS.iter().map(|(n, _)| *n))
+        .chain(FUNCS.iter().copied())
+        .chain(PASS.iter().copied())
+}
+
 const NARY_CHARS: &[char] = &['∑', '∏', '∫', '∬', '∭', '∮', '⋃', '⋂'];
 
 // ---- parsing ------------------------------------------------------------------------------

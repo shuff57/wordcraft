@@ -439,6 +439,49 @@ const MAX_TYPED: usize = 100_000;
 /// Most single steps one Tab takes looking for the next place.
 const MAX_TAB_STEPS: usize = 10_000;
 
+/// What a typed `\name` becomes.
+enum Cmd {
+    /// A symbol or letter.
+    Sym(char),
+    /// A node with no places to fill (an operator word).
+    Leaf(Node),
+    /// A structure with empty places, and the place the caret goes to.
+    Node(Node, usize),
+    /// Accepted and dropped (`\left`, `\right`).
+    Nothing,
+}
+
+/// The meaning of a typed LaTeX command name.
+fn latex_cmd(name: &str) -> Option<Cmd> {
+    use crate::linear;
+    let plain = |t: &str| Node::Styled { text: t.into(), style: crate::Style::Plain };
+    Some(match name {
+        "frac" | "dfrac" | "tfrac" | "cfrac" => Cmd::Node(Node::Frac { num: vec![], den: vec![] }, 0),
+        "sqrt" => Cmd::Node(Node::Rad { deg: None, body: vec![] }, 0),
+        "left" | "right" => Cmd::Nothing,
+        "lim" => Cmd::Node(Node::Limit { lower: true, base: vec![plain("lim")], lim: vec![] }, 1),
+        _ => {
+            if let Some((op, limits)) = linear::nary_op(name) {
+                Cmd::Node(Node::Nary { op, sub: limits.then(Vec::new), sup: limits.then(Vec::new), body: vec![] }, 0)
+            } else if linear::is_bare_func(name) {
+                Cmd::Node(Node::Func { name: name.into(), body: vec![] }, 0)
+            } else if linear::is_function_word(name) {
+                Cmd::Leaf(plain(name))
+            } else if let Some(ch) = linear::accent(name) {
+                Cmd::Node(Node::Accent { ch, body: vec![] }, 0)
+            } else {
+                Cmd::Sym(linear::symbol(name)?)
+            }
+        }
+    })
+}
+
+/// True when some longer command name starts with `name` (`in` is also the start of `int`).
+fn has_longer_cmd(name: &str) -> bool {
+    const EXTRA: [&str; 7] = ["frac", "dfrac", "tfrac", "cfrac", "sqrt", "left", "right"];
+    crate::linear::command_names().chain(EXTRA).any(|n| n.len() > name.len() && n.starts_with(name))
+}
+
 /// A math tree being edited with a caret and an optional selection.
 #[derive(Debug, Clone)]
 pub struct Editor {
@@ -448,6 +491,10 @@ pub struct Editor {
     anchor: Option<usize>,
     undo: Vec<Snap>,
     redo: Vec<Snap>,
+    /// A command or script just made a place: a `{` typed next opens its argument (LaTeX style).
+    expect_brace: bool,
+    /// Unclosed argument braces typed so far; a `}` closes the innermost one.
+    brace_depth: u32,
 }
 
 /// Most edits kept for undo.
@@ -464,7 +511,7 @@ struct Snap {
 impl Editor {
     /// Edit `math` with the caret at the end of the top row.
     pub fn new(math: Math) -> Editor {
-        let mut e = Editor { math, caret: Caret::default(), anchor: None, undo: vec![], redo: vec![] };
+        let mut e = Editor { math, caret: Caret::default(), anchor: None, undo: vec![], redo: vec![], expect_brace: false, brace_depth: 0 };
         e.caret.pos = units(&e.math.body);
         e
     }
@@ -527,6 +574,8 @@ impl Editor {
 
     /// Put the caret at `c` (clamped into the tree), dropping any selection.
     pub fn set_caret(&mut self, c: Caret) {
+        self.expect_brace = false;
+        self.brace_depth = 0;
         self.caret = c;
         self.anchor = None;
         self.fix();
@@ -544,6 +593,40 @@ impl Editor {
         } else {
             self.set_caret(c);
         }
+    }
+
+    /// Finish a `\name` still being typed (`\in` waits for a longer name): call before reading
+    /// the result.
+    pub fn flush(&mut self) {
+        self.tracked(|e| e.flush_cmd());
+    }
+
+    /// The fixed end of the selection as a caret (the caret itself when nothing is selected).
+    pub fn anchor_caret(&self) -> Caret {
+        Caret { path: self.caret.path.clone(), pos: self.anchor.unwrap_or(self.caret.pos) }
+    }
+
+    /// Select from caret `a` to caret `b`, wherever they are: when they are in different rows
+    /// the selection covers whole structures of the nearest row that holds both (a mouse drag
+    /// or a shift-click).
+    pub fn select_between(&mut self, a: &Caret, b: &Caret) {
+        self.expect_brace = false;
+        self.brace_depth = 0;
+        let k = a.path.iter().zip(&b.path).take_while(|(x, y)| x == y).count();
+        let Some(seq) = a.path.get(..k).and_then(|p| seq_at(&self.math.body, p)) else {
+            self.set_caret(b.clone());
+            return;
+        };
+        let end = units(seq);
+        let spot = |c: &Caret| match c.path.get(k) {
+            Some(&(i, _)) => (start_of(seq, i).min(end), true),
+            None => (c.pos.min(end), false),
+        };
+        let ((pa, na), (pb, nb)) = (spot(a), spot(b));
+        let (anchor, caret) = if pa < pb || (pa == pb && nb) { (pa, pb + usize::from(nb)) } else { (pa + usize::from(na), pb) };
+        self.caret = Caret { path: a.path.get(..k).map(<[_]>::to_vec).unwrap_or_default(), pos: caret };
+        self.anchor = (anchor != caret).then_some(anchor);
+        self.fix();
     }
 
     /// Select the whole top row.
@@ -632,7 +715,24 @@ impl Editor {
 
     fn type_char_raw(&mut self, c: char) {
         self.fix();
+        if !c.is_ascii_alphabetic() {
+            self.flush_cmd();
+        }
+        let expect = std::mem::take(&mut self.expect_brace);
+        if c == '{' && expect {
+            self.brace_depth = self.brace_depth.saturating_add(1);
+            return;
+        }
+        if c == '}' && self.brace_depth > 0 && !self.in_brace_delim() {
+            self.brace_depth -= 1;
+            self.close_arg();
+            return;
+        }
         match c {
+            '\\' => {
+                self.leave_func_arg();
+                self.insert_char('\\');
+            }
             '^' => self.script(true),
             '_' => self.script(false),
             '/' => self.fraction(),
@@ -674,10 +774,98 @@ impl Editor {
             'h' if self.extend_func_name() => {}
             c => {
                 self.insert_char(c);
-                if c.is_ascii_alphabetic() {
+                if c.is_ascii_alphabetic() && !self.latex_step() {
                     self.autoconvert();
                 }
             }
+        }
+    }
+
+    // ---------- typed LaTeX commands ----------
+
+    /// The `\name` being typed right before the caret: where its backslash is and the name.
+    fn pending_cmd(&self) -> Option<(usize, String)> {
+        if self.selection().is_some() {
+            return None;
+        }
+        let cls = unit_chars(self.seq());
+        let pos = self.caret.pos.min(cls.len());
+        let mut s = pos;
+        while s > 0 && matches!(cls.get(s - 1), Some(Some(c)) if c.is_ascii_alphabetic()) {
+            s -= 1;
+        }
+        if s == pos || s == 0 || cls.get(s - 1) != Some(&Some('\\')) {
+            return None;
+        }
+        let name: String = cls.get(s..pos)?.iter().filter_map(|c| *c).collect();
+        Some((s - 1, name))
+    }
+
+    /// After a letter of a `\name`: make it right away when nothing longer could be meant
+    /// (`\alpha`, `\frac`), else wait for the next character. True while a command is pending.
+    fn latex_step(&mut self) -> bool {
+        let Some((bs, name)) = self.pending_cmd() else { return false };
+        if latex_cmd(&name).is_some() && !has_longer_cmd(&name) {
+            self.commit_cmd(bs, &name);
+        }
+        true
+    }
+
+    /// A character that cannot continue a command name ends a pending one (`\in` then a space).
+    fn flush_cmd(&mut self) {
+        if let Some((bs, name)) = self.pending_cmd()
+            && latex_cmd(&name).is_some()
+        {
+            self.commit_cmd(bs, &name);
+        }
+    }
+
+    /// Replace the typed `\name` (from `bs` to the caret) by what it stands for.
+    fn commit_cmd(&mut self, bs: usize, name: &str) {
+        let Some(cmd) = latex_cmd(name) else { return };
+        let pos = self.caret.pos;
+        if matches!(cmd, Cmd::Node(..)) && !self.can_nest() {
+            return;
+        }
+        self.delete_range(bs, pos);
+        match cmd {
+            Cmd::Sym(c) => self.insert_char(c),
+            Cmd::Nothing => {}
+            Cmd::Leaf(node) => {
+                if self.insert_nodes(vec![node]).is_some() {
+                    self.caret.pos += 1;
+                }
+            }
+            Cmd::Node(node, child) => {
+                if let Some(i) = self.insert_nodes(vec![node]) {
+                    self.caret.path.push((i, child));
+                    self.caret.pos = 0;
+                    self.expect_brace = true;
+                }
+            }
+        }
+    }
+
+    /// The innermost place is a `{ }` delimiter pair's content (so a `}` closes that).
+    fn in_brace_delim(&self) -> bool {
+        let Some(&(i, _)) = self.caret.path.last() else { return false };
+        let parent = self.caret.path.get(..self.caret.path.len() - 1).and_then(|p| seq_at(&self.math.body, p));
+        matches!(parent.and_then(|s| s.get(i)).map(Node::bare), Some(Node::Delim { close, .. }) if close == "}")
+    }
+
+    /// A `}` that ends a LaTeX-style argument: on to the next place of a fraction, otherwise out
+    /// of the structure. A big operator's limit stays put so `\sum_{i=1}^{n}` can add the other.
+    fn close_arg(&mut self) {
+        self.anchor = None;
+        let Some(&(i, c)) = self.caret.path.last() else { return };
+        let parent = self.caret.path.get(..self.caret.path.len() - 1).and_then(|p| seq_at(&self.math.body, p));
+        match parent.and_then(|s| s.get(i)).map(Node::bare) {
+            Some(Node::Nary { sub, sup, .. }) if c < usize::from(sub.is_some()) + usize::from(sup.is_some()) => {}
+            Some(Node::Frac { .. }) if c == 0 => {
+                self.leave_right();
+                self.expect_brace = true;
+            }
+            _ => self.leave_right(),
         }
     }
 
@@ -967,10 +1155,36 @@ impl Editor {
     }
 
     fn script(&mut self, sup: bool) {
+        self.script_raw(sup);
+        self.expect_brace = true;
+    }
+
+    /// `_` right after `lim` (or `^` in an empty upper limit...): the place is already there, so
+    /// typing it must not nest a script with an empty base inside it.
+    fn redundant_script(&self, sup: bool) -> bool {
+        if self.selection().is_some() || self.len_here() != 0 {
+            return false;
+        }
+        let Some(&(i, c)) = self.caret.path.last() else { return false };
+        let parent = self.caret.path.get(..self.caret.path.len() - 1).and_then(|p| seq_at(&self.math.body, p));
+        match parent.and_then(|s| s.get(i)).map(Node::bare) {
+            Some(Node::Limit { lower, .. }) => c == 1 && *lower != sup,
+            Some(Node::Nary { sub, sup: up, .. }) => {
+                if sup {
+                    up.is_some() && c == usize::from(sub.is_some())
+                } else {
+                    sub.is_some() && c == 0
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn script_raw(&mut self, sup: bool) {
         if !self.can_nest() {
             return;
         }
-        if self.nary_limit(sup) {
+        if self.redundant_script(sup) || self.nary_limit(sup) {
             return;
         }
         let base = if let Some((a, b)) = self.selection() {
@@ -1168,6 +1382,13 @@ impl Editor {
 
     /// Press a navigation or deletion key; `shift` extends the selection (Left, Right, Home, End).
     pub fn key(&mut self, key: Key, shift: bool) {
+        if !matches!(key, Key::Undo | Key::Redo) {
+            self.tracked(|e| e.flush_cmd());
+        }
+        if !matches!(key, Key::Backspace | Key::Delete) {
+            self.expect_brace = false;
+            self.brace_depth = 0;
+        }
         match key {
             Key::Undo => {
                 let _ = self.undo();

@@ -687,3 +687,75 @@ fn operators_leave_a_filled_exponent_or_subscript() {
     // Limits of a big operator are not scripts: `=` stays in the limit.
     assert_eq!(typed("sumi=1").caret().path, vec![(0, 0)], "the lower limit keeps the =");
 }
+
+#[test]
+fn typed_latex_commands_become_symbols_and_structures() {
+    assert_eq!(ty("\\alpha"), "α");
+    assert_eq!(ty("\\alpha\\beta"), "αβ");
+    assert_eq!(ty("2\\pi r"), "2πr");
+    assert_eq!(ty("a\\leq b"), "a≤b");
+    assert_eq!(ty("a\\in b"), "a∈b");
+    assert_eq!(ty("\\int_0^1"), ty("int_0^1"));
+    assert!(matches!(typed("\\int").math().body.first(), Some(Node::Nary { op: '\u{222B}', .. })), "int is not eaten by in");
+    assert!(matches!(typed("\\sqrt").math().body.first(), Some(Node::Rad { .. })));
+    assert!(matches!(typed("\\sin").math().body.first(), Some(Node::Func { name, .. }) if name == "sin") || typed("\\sin ").math().body.len() == 1);
+    assert!(matches!(typed("\\sin ").math().body.first(), Some(Node::Func { name, .. }) if name == "sin"));
+    assert!(matches!(typed("\\sinh").math().body.first(), Some(Node::Func { name, .. }) if name == "sinh"));
+    // An unknown command stays as typed.
+    assert!(matches!(typed("\\foo").math().body.first(), Some(Node::Text(t)) if t == "\\foo"));
+    assert_eq!(ty("\\left(x\\right)"), "(x)");
+}
+
+#[test]
+fn braces_after_a_latex_command_are_its_arguments() {
+    assert_eq!(ty("\\frac{a+b}{c}"), ty("(a+b)/c"));
+    assert_eq!(ty("\\frac{1}{2}+x"), "1/2+x");
+    assert_eq!(ty("\\sqrt{x+1}"), "√(x+1)");
+    assert_eq!(ty("x^{2}+1"), "x^2+1");
+    assert_eq!(ty("x_{ab}+1"), "x_(ab)+1");
+    assert_eq!(ty("\\sum_{i=1}^{n}i"), ty("sum_i=1^n i"));
+    assert_eq!(ty("e^{-x^{2}}"), ty("e^-x^2"));
+    // A real brace pair is still a brace pair.
+    assert!(matches!(typed("{a}").math().body.first(), Some(Node::Delim { open, .. }) if open == "{"));
+    // Unmatched braces never panic or leave the caret invalid.
+    for s in ["}", "\\frac}}", "\\frac{{{", "x^{", "\\sqrt}{"] {
+        assert!(typed(s).is_valid(), "{s}");
+    }
+}
+
+#[test]
+fn a_limit_subscript_does_not_nest_an_empty_script() {
+    for s in ["lim_x", "\\lim_x", "\\lim_{x\\to0}"] {
+        let e = typed(s);
+        let Some(Node::Limit { lim, .. }) = e.math().body.first() else { panic!("{s}: {:?}", e.math().body) };
+        assert!(!lim.iter().any(|n| matches!(n.bare(), Node::Script { .. })), "{s}: stray script in {lim:?}");
+        assert!(!to_linear(e.math()).contains("()_"), "{s}: {}", to_linear(e.math()));
+    }
+    assert_eq!(lin(&typed("\\lim_{x\\to0}")), lin(&typed("lim_x→0")));
+    assert!(matches!(typed("\\lim_{x\\to0}").math().body.first(), Some(Node::Limit { lim, .. }) if units(lim) == 3));
+    // The same for an operator whose limit places already exist.
+    let e = typed("sum_i");
+    assert!(matches!(e.math().body.first(), Some(Node::Nary { sub: Some(s), .. }) if units(s) == 1));
+}
+
+#[test]
+fn select_between_covers_whole_structures_across_rows() {
+    let mut e = typed("a+x/y");
+    // From the start of the top row to inside the denominator: everything up to the fraction.
+    let start = Caret { path: vec![], pos: 0 };
+    let in_den = e.caret().clone();
+    assert_eq!(in_den.path.len(), 1);
+    e.select_between(&start, &in_den);
+    assert!(e.caret().path.is_empty());
+    assert_eq!(e.selection(), Some((0, units(&e.math().body))));
+    // Backwards, from the denominator to the start.
+    e.select_between(&in_den, &start);
+    assert_eq!(e.selection(), Some((0, units(&e.math().body))));
+    // Within one row it is a plain range.
+    let mut e = typed("abcd");
+    e.select_between(&Caret { path: vec![], pos: 1 }, &Caret { path: vec![], pos: 3 });
+    assert_eq!(e.selection(), Some((1, 3)));
+    // Stale carets never panic.
+    e.select_between(&Caret { path: vec![(9, 9)], pos: 9 }, &Caret { path: vec![(8, 1), (1, 1)], pos: 99 });
+    assert!(e.is_valid());
+}

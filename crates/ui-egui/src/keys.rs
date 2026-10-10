@@ -95,6 +95,15 @@ fn dispatch(app: &mut WordApp, key: Key, m: Modifiers) -> bool {
     let Some(name) = key_name(key) else { return false };
     let reg = app.session.registry.clone();
     if let Some(spec) = reg.by_shortcut(&combo(m, name, true)) {
+        // The equation shortcut opens the editor, like the ribbon button; the command itself
+        // (programmatic, no dialog) stays what agents call.
+        if spec.id == "insert.equation" {
+            if matches!(app.dialog, Some(crate::dialogs::Dialog::Equation { .. })) {
+                return true;
+            }
+            let _ = app.run("ui.dialog", json!({"name": "equation"}));
+            return true;
+        }
         let _ = app.run(spec.id, json!({}));
         return true;
     }

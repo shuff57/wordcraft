@@ -15,7 +15,7 @@ use wordcraft_doc::Rgb;
 use egui::{Color32, Key, Sense, TextureHandle, TextureOptions, Ui, pos2, vec2};
 use serde_json::{Value, json};
 use wordcraft_engine::Session;
-use wordcraft_math::{Editor, Key as MKey, Math, from_linear, from_omml, templates, to_linear, to_omml};
+use wordcraft_math::{Caret, Editor, Key as MKey, Math, from_linear, from_omml, templates, to_linear, to_omml};
 
 use crate::WordApp;
 use crate::theme::{self, Tokens};
@@ -80,6 +80,10 @@ pub struct EqState {
     touched: f64,
     /// True while the mouse button that started in the canvas is held.
     dragging: bool,
+    /// Where the mouse press (or the shift-click's fixed end) is: selections run from here.
+    origin: Caret,
+    /// Enter was pressed: insert or update.
+    submit: bool,
     /// The equation the dialog opened with, to tell whether Escape would lose work.
     initial: Math,
     /// Escape was pressed once with unsaved work: the next one discards it.
@@ -107,6 +111,8 @@ impl EqState {
             canvas: None,
             touched: 0.0,
             dragging: false,
+            origin: Caret::default(),
+            submit: false,
             initial: Math::default(),
             discard_armed: false,
             view: (pos2(0.0, 0.0), 1.0),
@@ -202,6 +208,10 @@ fn handle_input(ui: &Ui, st: &mut EqState) -> bool {
                     Key::Backspace => Some(MKey::Backspace),
                     Key::Delete => Some(MKey::Delete),
                     Key::Tab => Some(MKey::Tab),
+                    Key::Enter => {
+                        st.submit = true;
+                        None
+                    }
                     Key::Z if modifiers.command => Some(if modifiers.shift { MKey::Redo } else { MKey::Undo }),
                     Key::Y if modifiers.command => Some(MKey::Redo),
                     _ => None,
@@ -285,18 +295,27 @@ fn canvas(ui: &mut Ui, st: &mut EqState) {
     st.view = (origin, k);
     let to_layout = |p: egui::Pos2| ((p.x - origin.x) / k.max(1e-3), (p.y - origin.y) / k.max(1e-3));
 
-    // Mouse: press places the caret, dragging inside one row selects.
+    // Mouse: press places the caret, dragging or shift-click selects (across rows too).
     let (pressed, down, pointer) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.interact_pos()));
     if let Some(p) = pointer {
         let (x, y) = to_layout(p);
         if pressed && rect.contains(p) {
             ui.memory_mut(|m| m.request_focus(id));
             st.wants_canvas = true;
-            st.ed.set_caret(cv.layout.hit(f64::from(x), f64::from(y)));
+            let hit = cv.layout.hit(f64::from(x), f64::from(y));
+            if ui.input(|i| i.modifiers.shift) {
+                // Shift-click: extend from the fixed end of the current selection.
+                st.origin = st.ed.anchor_caret();
+                st.ed.select_between(&st.origin, &hit);
+            } else {
+                st.ed.set_caret(hit.clone());
+                st.origin = hit;
+            }
             st.dragging = true;
             st.touched = now;
         } else if st.dragging && down {
-            st.ed.drag_caret(cv.layout.hit(f64::from(x), f64::from(y)));
+            let hit = cv.layout.hit(f64::from(x), f64::from(y));
+            st.ed.select_between(&st.origin, &hit);
         }
     }
     if !down {
@@ -331,7 +350,7 @@ fn canvas(ui: &mut Ui, st: &mut EqState) {
         painter.text(
             pos2(rect.min.x + 14.0, rect.center().y),
             egui::Align2::LEFT_CENTER,
-            tl!("Type here: x^2, a/b, sqrt, alpha"),
+            tl!("Type here: x^2, a/b, \\frac, \\sqrt, \\alpha"),
             theme::regular(13.0),
             Color32::from_gray(150),
         );
@@ -469,6 +488,9 @@ pub fn body(app: &mut WordApp, ui: &mut Ui, st: &mut EqState) -> bool {
                 .font(theme::regular(14.0))
                 .hint_text("a^2+b^2=c^2, x=(-b±sqrt(b^2-4ac))/2a"),
         );
+        if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+            st.submit = true;
+        }
         if r.has_focus() || r.gained_focus() {
             st.wants_canvas = false;
         }
@@ -489,7 +511,7 @@ pub fn body(app: &mut WordApp, ui: &mut Ui, st: &mut EqState) -> bool {
 
     let editing = st.is_edit();
     let esc = ui.input(|i| i.key_pressed(Key::Escape));
-    let (mut ok, mut cancel) = (false, false);
+    let (mut ok, mut cancel) = (std::mem::take(&mut st.submit), false);
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button(tl!("Cancel")).clicked() {
@@ -497,13 +519,14 @@ pub fn body(app: &mut WordApp, ui: &mut Ui, st: &mut EqState) -> bool {
             }
             let label = if editing { tl!("Update") } else { tl!("Insert") };
             let b = ui.add(egui::Button::new(egui::RichText::new(label).color(egui::Color32::WHITE)).fill(theme::APP_COLOR));
-            ok = b.clicked();
+            ok |= b.clicked();
         });
     });
     if esc && escape_closes(st) {
         cancel = true;
     }
     if ok {
+        st.ed.flush();
         if st.ed.is_blank() {
             st.error = Some(tl!("Type or build an equation first.").to_string());
             return false;
@@ -911,6 +934,102 @@ mod tests {
         }
         assert!(st(&h).ed.is_valid());
         assert!(h.state().dialog.is_some());
+    }
+
+    #[test]
+    fn typed_latex_works_in_the_canvas() {
+        let mut h = opened();
+        typ(&mut h, "\\alpha");
+        assert_eq!(lin(&h), "\u{3b1}");
+        typ(&mut h, "+\\frac{1}{2}");
+        assert_eq!(lin(&h), "\u{3b1}+1/2");
+        typ(&mut h, "\\sqrt{x}");
+        assert!(lin(&h).ends_with('x'), "{}", lin(&h));
+        assert!(st(&h).ed.math().body.iter().any(|n| matches!(n.bare(), wordcraft_math::Node::Rad { .. })));
+    }
+
+    #[test]
+    fn typing_lim_with_a_subscript_leaves_no_empty_box() {
+        let mut h = opened();
+        typ(&mut h, "lim_x");
+        assert!(!st(&h).linear.contains("()_"), "{}", st(&h).linear);
+        let mut h = opened();
+        typ(&mut h, "\\lim_{x\\to0}");
+        assert!(!st(&h).linear.contains("()_"), "{}", st(&h).linear);
+    }
+
+    #[test]
+    fn enter_in_the_canvas_inserts_the_equation() {
+        let mut h = opened();
+        typ(&mut h, "x^2");
+        press(&mut h, Key::Enter);
+        h.run();
+        assert!(h.state().dialog.is_none());
+        assert_eq!(eq_count(h.state()), 1);
+        // Nothing typed: Enter keeps the dialog open with a message.
+        let mut h = opened();
+        press(&mut h, Key::Enter);
+        assert!(h.state().dialog.is_some());
+        assert_eq!(eq_count(h.state()), 0);
+    }
+
+    #[test]
+    fn alt_equals_opens_the_editor_instead_of_dropping_a_canned_equation() {
+        let mut h = Harness::builder().with_size(vec2(1100.0, 800.0)).build_ui_state(
+            |ui, app: &mut WordApp| {
+                app.logic(ui.ctx());
+                app.ui(ui);
+            },
+            app(),
+        );
+        for _ in 0..3 {
+            h.step();
+        }
+        h.key_press_modifiers(Modifiers::ALT, Key::Equals);
+        for _ in 0..3 {
+            h.step();
+        }
+        assert!(matches!(h.state().dialog, Some(Dialog::Equation { .. })), "dialog opens");
+        assert_eq!(eq_count(h.state()), 0, "nothing inserted behind the dialog");
+        // A second press while the editor is open does not reset it.
+        typ_state(&mut h, "x");
+        h.key_press_modifiers(Modifiers::ALT, Key::Equals);
+        h.step();
+        h.step();
+        assert!(matches!(&h.state().dialog, Some(Dialog::Equation { st }) if !st.ed.is_blank()));
+    }
+
+    fn typ_state(h: &mut Harness<'static, WordApp>, text: &str) {
+        h.event(egui::Event::Text(text.into()));
+        h.step();
+        h.step();
+    }
+
+    #[test]
+    fn shift_click_extends_the_selection() {
+        let mut h = opened();
+        typ(&mut h, "abcd");
+        let (origin, k) = st(&h).view;
+        let at = |h: &Harness<'static, WordApp>, pos: usize| {
+            let r = st(h).canvas.as_ref().and_then(|c| c.layout.caret_rect(&Caret { path: vec![], pos }));
+            r.map(|r| pos2(origin.x + ((r.x0 + r.x1) / 2.0) as f32 * k, origin.y + ((r.y0 + r.y1) / 2.0) as f32 * k))
+        };
+        let (Some(p1), Some(p3)) = (at(&h, 1), at(&h, 3)) else { panic!("no caret rects") };
+        h.event(egui::Event::PointerMoved(p1));
+        h.run();
+        h.event(egui::Event::PointerButton { pos: p1, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.run();
+        h.event(egui::Event::PointerButton { pos: p1, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.run();
+        h.event(egui::Event::PointerMoved(p3));
+        h.run();
+        let down = egui::Event::PointerButton { pos: p3, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::SHIFT };
+        h.event_modifiers(down, Modifiers::SHIFT);
+        h.run();
+        let up = egui::Event::PointerButton { pos: p3, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::SHIFT };
+        h.event_modifiers(up, Modifiers::SHIFT);
+        h.run();
+        assert_eq!(st(&h).ed.selection(), Some((1, 3)), "{:?}", st(&h));
     }
 
     #[test]
