@@ -412,13 +412,24 @@ impl Lay {
         let mut i = 0;
         while i < chars.len() {
             let c = chars.get(i).copied().unwrap_or(' ');
+            // Wide spaces are fixed gaps, not glyphs (the math fonts may lack them): column breaks.
+            let gap = match c {
+                '\u{2003}' => Some(1.0),
+                '\u{2002}' => Some(0.5),
+                _ => None,
+            };
+            if let Some(g) = gap {
+                x += g * sz;
+                i += 1;
+                continue;
+            }
             let cv = self.var_for(c, v);
             let face = self.pick(cv, c);
             let mut j = i + 1;
             while j < chars.len() {
                 let d = chars.get(j).copied().unwrap_or(' ');
                 let dv = self.var_for(d, v);
-                if dv != cv || !Arc::ptr_eq(&self.pick(dv, d), &face) {
+                if matches!(d, '\u{2003}' | '\u{2002}') || dv != cv || !Arc::ptr_eq(&self.pick(dv, d), &face) {
                     break;
                 }
                 j += 1;
@@ -608,6 +619,13 @@ impl Lay {
             Node::Text(t) => {
                 for c in t.chars() {
                     let before = parts.len();
+                    if c == '\u{2003}' || c == '\u{2002}' {
+                        // A column break (cases): a fixed wide gap, and what follows starts afresh.
+                        marks.push((before, before, 0.0));
+                        parts.push(MathBox::space(if c == '\u{2003}' { sz } else { sz * 0.5 }));
+                        *prev = Class::None;
+                        continue;
+                    }
                     if c.is_whitespace() {
                         marks.push((before, before, 0.0));
                         continue;

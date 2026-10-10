@@ -309,7 +309,11 @@ impl Reader<'_> {
             }
             "w:smartTag" | "w:customXml" | "w:dir" | "w:bdo" => self.read_inline_children(sc, pb, k, rels, ctx, depth + 1),
             "m:oMath" | "m:oMathPara" => {
-                let props = self.run_props_none(ctx);
+                // Formatting lives in the w:rPr of the math runs; the first one speaks for the equation.
+                let props = match math_rpr(k, 0) {
+                    Some(p) => self.run_props(p, ctx),
+                    None => self.run_props_none(ctx),
+                };
                 let omml = k.to_xml();
                 let linear = wordcraft_math::to_linear(&wordcraft_math::from_omml(&omml));
                 let display = k.name == "m:oMathPara";
@@ -764,4 +768,18 @@ fn anchor_float(c: &El) -> Float {
     }
     f.dist = c.attr("distL").and_then(|v| measure(v, 12_700.0)).unwrap_or(0.0).clamp(0.0, 1584.0);
     f
+}
+
+/// The first `w:rPr` that belongs to a math run (`m:r`), not to a control mark.
+fn math_rpr(e: &El, depth: usize) -> Option<&El> {
+    if depth > 256 {
+        return None;
+    }
+    if e.name == "m:r" {
+        return e.child("w:rPr");
+    }
+    if e.name == "m:ctrlPr" {
+        return None;
+    }
+    e.els().find_map(|c| math_rpr(c, depth + 1))
 }

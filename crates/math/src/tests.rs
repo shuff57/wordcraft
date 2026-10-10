@@ -1146,3 +1146,25 @@ fn nary_keeps_parentheses_around_a_sum_but_not_around_a_term() {
     let lin = to_linear(&from_linear("prod_(k=1)^n (1+1/k)"));
     assert_eq!(from_linear(&lin).body, from_linear("prod_(k=1)^n (1+1/k)").body);
 }
+
+#[test]
+fn latex_frac_takes_single_character_arguments() {
+    assert_eq!(from_linear("\\frac13").body, vec![Node::Frac { num: txt("1"), den: txt("3") }]);
+    assert_eq!(from_linear("\\frac{1}2").body, vec![Node::Frac { num: txt("1"), den: txt("2") }]);
+    assert_eq!(from_linear("\\frac a b").body, vec![Node::Frac { num: txt("a"), den: txt("b") }]);
+    // Missing arguments stay harmless.
+    let _ = from_linear("\\frac");
+    let _ = from_linear("\\frac1");
+}
+
+#[test]
+fn cases_keep_their_column_break() {
+    for src in ["\\begin{cases}x^2&x\\ge 0\\\\-x&x<0\\end{cases}", "cases(x^2&x>=0@-x&x<0)"] {
+        let m = from_linear(src);
+        let lin = to_linear(&m);
+        assert!(lin.starts_with("cases(") && lin.matches('&').count() == 2 && lin.contains('@'), "{src} -> {lin}");
+        // Stable through linear and OMML.
+        assert_eq!(from_linear(&lin), m, "{lin}");
+        assert_eq!(from_omml(&to_omml(&m)), m);
+    }
+}

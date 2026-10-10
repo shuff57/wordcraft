@@ -814,6 +814,28 @@ fn omml_inline_and_display_round_trip_unchanged() {
 }
 
 #[test]
+fn omml_run_formatting_survives_round_trip() {
+    let props = CharProps { size: Some(40.0), bold: Some(true), ..Default::default() };
+    for omml in [Some(FRAC.to_string()), None] {
+        let mut p = Paragraph::with_text("see ", CharProps::default());
+        let end = p.len();
+        p.insert_object(end, InlineObject::Equation { linear: "a/b+1".into(), display: false, omml }, &props).unwrap();
+        let mut d = Document::new();
+        d.body = vec![para_block(p)];
+        let r = rt(&d);
+        let q = paras(&r)[0];
+        let at = q.object_offsets().into_iter().next().unwrap();
+        let got = q.props_of_char(at);
+        assert_eq!(got.size, Some(40.0), "{got:?}");
+        assert_eq!(got.bold, Some(true));
+        // Stable on a second trip.
+        let q2 = rt(&r);
+        let q2 = paras(&q2)[0];
+        assert_eq!(q2.props_of_char(at).size, Some(40.0));
+    }
+}
+
+#[test]
 fn omml_inside_table_cell_round_trips() {
     let mut t = Table::new(1, 1, 200.0);
     let mut p = Paragraph::new();

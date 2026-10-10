@@ -475,8 +475,8 @@ impl Parser {
         let w = self.word();
         match w.as_str() {
             "frac" | "dfrac" | "tfrac" => {
-                let num = self.brace_arg();
-                let den = self.brace_arg();
+                let num = self.frac_arg();
+                let den = self.frac_arg();
                 out.push(Node::Frac { num, den });
             }
             "begin" => self.environment(out),
@@ -742,6 +742,21 @@ impl Parser {
         Some(t)
     }
 
+    /// An argument of `\frac`: a group, a command, or (as in TeX) a single character, so
+    /// `\frac13` is 1 over 3.
+    fn frac_arg(&mut self) -> Seq {
+        self.skip_ws();
+        match self.peek() {
+            Some(c) if c.is_alphanumeric() => {
+                self.pos += 1;
+                let mut o = Seq::new();
+                push_text(&mut o, &c.to_string());
+                o
+            }
+            _ => self.brace_arg(),
+        }
+    }
+
     fn brace_arg(&mut self) -> Seq {
         if self.depth >= MAX_DEPTH {
             return vec![];
@@ -825,7 +840,27 @@ impl Parser {
             match w {
                 "eqarr" => return self.eq_array(),
                 "cases" => {
-                    let a = self.eq_array()?;
+                    // `&` between cells is a column break: a wide gap, shown as `&` in linear text.
+                    let a = match self.matrix()? {
+                        Node::Matrix { rows } => Node::EqArr {
+                            rows: rows
+                                .into_iter()
+                                .map(|r| {
+                                    let mut o = Seq::new();
+                                    for (k, c) in r.into_iter().enumerate() {
+                                        if k > 0 {
+                                            push_text(&mut o, "\u{2003}");
+                                        }
+                                        for n in c {
+                                            push_node(&mut o, n);
+                                        }
+                                    }
+                                    o
+                                })
+                                .collect(),
+                        },
+                        _ => return None,
+                    };
                     return Some(Node::Delim { open: "{".into(), close: String::new(), sep: "|".into(), items: vec![vec![a]] });
                 }
                 "overline" | "underline" => {
@@ -1329,7 +1364,7 @@ fn seq(out: &mut String, s: &Seq, depth: usize) {
                 if open == "{" && close.is_empty() && matches!(items.as_slice(), [it] if matches!(it.as_slice(), [Node::EqArr { .. }])) =>
             {
                 let rows = match items.first().and_then(|it| it.first()) {
-                    Some(Node::EqArr { rows }) => rows.iter().map(|r| lin(r, d)).collect::<Vec<_>>(),
+                    Some(Node::EqArr { rows }) => rows.iter().map(|r| lin(r, d).replace('\u{2003}', "&")).collect::<Vec<_>>(),
                     _ => vec![],
                 };
                 out.push_str(&format!("cases({})", rows.join("@")));

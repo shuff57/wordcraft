@@ -293,7 +293,8 @@ impl Writer<'_> {
                 let stored =
                     omml.as_deref().and_then(|x| crate::xml::parse(x.as_bytes()).ok()).filter(|e| e.name == "m:oMath" || e.name == "m:oMathPara");
                 self.rev_open(w, props);
-                if let Some(e) = stored {
+                if let Some(mut e) = stored {
+                    stamp_run_props(&mut e, props);
                     w.raw(&e.to_xml());
                 } else {
                     // Linear-only equation: typeset it (fractions, scripts, roots) rather than
@@ -302,7 +303,10 @@ impl Writer<'_> {
                     m.para = *display;
                     let xml = wordcraft_math::to_omml(&m);
                     match crate::xml::parse(xml.as_bytes()) {
-                        Ok(e) => w.raw(&e.to_xml()),
+                        Ok(mut e) => {
+                            stamp_run_props(&mut e, props);
+                            w.raw(&e.to_xml());
+                        }
                         Err(_) => {
                             w.open("m:oMath", &[]);
                             w.open("m:r", &[]);
@@ -758,4 +762,37 @@ fn toc_span(bl: &Blocks) -> Option<(usize, usize)> {
         })
         .count();
     (entries > 0).then_some((start, start + entries))
+}
+
+/// Write the equation's character formatting (size, bold, colour...) as a `w:rPr` inside every
+/// `m:r` (after `m:rPr`, before `m:t`), where OMML keeps it, so it survives a save and reopen.
+/// A run's existing `w:rPr` is replaced; with no formatting the tree is left as it was.
+fn stamp_run_props(root: &mut crate::xml::El, props: &CharProps) {
+    if !super::props::has_rpr(props) {
+        return;
+    }
+    let mut w = W::new();
+    w.open("w:rPr", &[("xmlns:w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")]);
+    rpr_inner(&mut w, props);
+    w.close("w:rPr");
+    let Ok(rpr_el) = crate::xml::parse(w.into_bytes().as_slice()) else {
+        return;
+    };
+    fn go(e: &mut crate::xml::El, rpr: &crate::xml::El, depth: usize) {
+        if depth > 256 {
+            return;
+        }
+        if e.name == "m:r" {
+            e.kids.retain(|n| !matches!(n, crate::xml::Node::El(k) if k.name == "w:rPr"));
+            let at = e.kids.iter().position(|n| !matches!(n, crate::xml::Node::El(k) if k.name == "m:rPr")).unwrap_or(e.kids.len());
+            e.kids.insert(at, crate::xml::Node::El(rpr.clone()));
+            return;
+        }
+        for k in &mut e.kids {
+            if let crate::xml::Node::El(c) = k {
+                go(c, rpr, depth + 1);
+            }
+        }
+    }
+    go(root, &rpr_el, 0);
 }
