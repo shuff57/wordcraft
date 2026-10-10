@@ -290,23 +290,29 @@ impl Writer<'_> {
                 // it is parsed and re-serialised from the tree, so only one well-formed
                 // m:oMath / m:oMathPara element is ever written. Anything else falls back to
                 // the linear text.
-                let safe =
+                let stored =
                     omml.as_deref().and_then(|x| crate::xml::parse(x.as_bytes()).ok()).filter(|e| e.name == "m:oMath" || e.name == "m:oMathPara");
-                if let Some(e) = safe {
+                self.rev_open(w, props);
+                if let Some(e) = stored {
                     w.raw(&e.to_xml());
                 } else {
-                    if *display {
-                        w.open("m:oMathPara", &[]);
-                    }
-                    w.open("m:oMath", &[]);
-                    w.open("m:r", &[]);
-                    w.leaf("m:t", &[("xml:space", "preserve")], linear);
-                    w.close("m:r");
-                    w.close("m:oMath");
-                    if *display {
-                        w.close("m:oMathPara");
+                    // Linear-only equation: typeset it (fractions, scripts, roots) rather than
+                    // writing the raw text as one literal run.
+                    let mut m = wordcraft_math::from_linear(linear);
+                    m.para = *display;
+                    let xml = wordcraft_math::to_omml(&m);
+                    match crate::xml::parse(xml.as_bytes()) {
+                        Ok(e) => w.raw(&e.to_xml()),
+                        Err(_) => {
+                            w.open("m:oMath", &[]);
+                            w.open("m:r", &[]);
+                            w.leaf("m:t", &[("xml:space", "preserve")], linear);
+                            w.close("m:r");
+                            w.close("m:oMath");
+                        }
                     }
                 }
+                self.rev_close(w, props);
             }
             InlineObject::Field { instr, result, locked } => self.field(w, instr, result, *locked, props),
             InlineObject::NoteRef { kind, id, custom } => {

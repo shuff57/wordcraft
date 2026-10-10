@@ -608,8 +608,9 @@ fn shapes_textboxes_equations_dropcaps_round_trip() {
     // Written without stored OMML; read back it gains the (verbatim) OMML source.
     match (&got[0].objects[2], &eq) {
         (InlineObject::Equation { linear, display, omml }, InlineObject::Equation { linear: l0, display: d0, .. }) => {
-            assert_eq!((linear, display), (l0, d0));
-            assert!(omml.is_some());
+            // The typeset round trip normalises ASCII minus to U+2212.
+            assert_eq!((linear.replace('\u{2212}', "-"), *display), (l0.clone(), *d0));
+            assert!(omml.as_deref().is_some_and(|x| x.contains("m:rad")));
         }
         o => panic!("{o:?}"),
     }
@@ -837,6 +838,18 @@ fn equation_without_omml_still_writes_linear_text() {
     assert!(disp);
     assert!(lin.contains("x+1"), "{lin}");
     assert!(omml.is_some_and(|x| x.contains("oMathPara")));
+}
+
+#[test]
+fn linear_only_equation_is_typeset_on_write() {
+    let mut p = Paragraph::new();
+    p.insert_object(0, InlineObject::Equation { linear: "a^2+b^2=c^2".into(), display: false, omml: None }, &CharProps::default()).unwrap();
+    let mut d = Document::new();
+    d.body = vec![para_block(p)];
+    let bytes = wordcraft_docx::write(&d).unwrap();
+    let xml = document_xml(&bytes);
+    assert!(xml.contains("m:sSup"), "{xml}");
+    assert!(!xml.contains("a^2+b^2"), "{xml}");
 }
 
 /// document.xml of a written docx.
