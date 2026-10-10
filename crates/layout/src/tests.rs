@@ -470,3 +470,86 @@ fn auto_hyphenation_breaks_long_words() {
     let l2 = lay(&d2);
     let _ = hyphens(&l2);
 }
+
+fn doc_with_eq(before: &str, linear: &str, display: bool, after: &str) -> Document {
+    let mut d = Document::from_text(&format!("{before}{after}"));
+    let props = wordcraft_doc::props::CharProps::default();
+    d.insert_object(&Pos::body(0, before.len()), InlineObject::Equation { linear: linear.into(), display, omml: None }, &props).unwrap();
+    d
+}
+
+fn first_para(l: &DocLayout) -> std::sync::Arc<para::ParaLayout> {
+    for p in &l.pages {
+        for it in &p.items {
+            if let Placed::Lines { para, .. } = it {
+                return para.clone();
+            }
+        }
+    }
+    panic!("no paragraph")
+}
+
+#[test]
+fn inline_equation_is_one_char_cluster_taller_than_text() {
+    let plain = Document::from_text("ab");
+    let d = doc_with_eq("a", "x^2/sqrt(y)", false, "b");
+    let (lp, ld) = (lay(&plain), lay(&d));
+    let pl = first_para(&ld);
+    let k = pl.clusters.iter().position(|c| matches!(c.kind, para::ClKind::Object(_))).unwrap();
+    let c = &pl.clusters[k];
+    assert_eq!(c.end - c.start, "\u{FFFC}".len(), "the equation is one character of the text");
+    assert!(c.adv > 10.0 && c.obj_h > 4.0);
+    assert!(pl.eq_at(k).is_some());
+    assert!(pl.lines[0].height > first_para(&lp).lines[0].height, "a fraction-with-root makes the line taller");
+    // Caret positions before and after the equation differ by the equation's width.
+    let (x0, x1) = (pl.x_of(0, 1).unwrap(), pl.x_of(0, 1 + "\u{FFFC}".len()).unwrap());
+    assert!((x1 - x0 - c.adv).abs() < 0.01);
+    // It draws glyphs, a bar and shapes.
+    let items = display::page_display(&d, &ld.pages[0], &display::DisplayOptions::default());
+    assert!(items.iter().any(|i| matches!(i, display::Draw::Fill { .. })), "fraction bar");
+    assert!(items.iter().any(|i| matches!(i, display::Draw::Path { .. })), "radical");
+}
+
+#[test]
+fn display_equation_is_centred_on_its_own_line() {
+    let d = doc_with_eq("lead in ", "a/b", true, " trailing text");
+    let ld = lay(&d);
+    let pl = first_para(&ld);
+    let k = pl.clusters.iter().position(|c| matches!(c.kind, para::ClKind::Object(_))).unwrap();
+    let e = pl.eq_at(k).unwrap();
+    assert!(e.display);
+    let line = pl.lines.iter().find(|l| (l.c0..l.c1).contains(&k)).unwrap();
+    assert!(
+        (line.c0..line.c1).all(|j| j == k || pl.clusters[j].kind == para::ClKind::Space),
+        "only a hanging space shares the line with a display equation"
+    );
+    assert!(pl.lines.len() >= 3, "text before and after sit on other lines");
+    let c = &pl.clusters[k];
+    let left = line.xs[k - line.c0] + e.dx;
+    let right = left + e.bx.width() as f32;
+    let mid = (left + right) / 2.0;
+    assert!((mid - (line.left + line.right) / 2.0).abs() < 1.0, "centred: {mid} vs {}", (line.left + line.right) / 2.0);
+    assert!(c.adv >= e.bx.width() as f32);
+}
+
+#[test]
+fn equations_from_omml_or_hostile_text_lay_out() {
+    let mut d = doc_with_eq("", "x", false, "");
+    for lin in ["", "(((((((((", &"x^".repeat(5000), "\u{0}\u{1}\u{FFFE}"] {
+        d.insert_object(
+            &Pos::body(0, 0),
+            InlineObject::Equation { linear: lin.into(), display: false, omml: Some("<m:oMath xmlns:m=\"x\"><m:f/></m:oMath>".into()) },
+            &wordcraft_doc::props::CharProps::default(),
+        )
+        .unwrap();
+        d.insert_object(
+            &Pos::body(0, 0),
+            InlineObject::Equation { linear: lin.into(), display: true, omml: None },
+            &wordcraft_doc::props::CharProps::default(),
+        )
+        .unwrap();
+    }
+    let l = lay(&d);
+    let pl = first_para(&l);
+    assert!(pl.height.is_finite() && pl.height > 0.0);
+}

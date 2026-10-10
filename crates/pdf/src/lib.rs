@@ -232,6 +232,47 @@ fn ok(v: f32) -> bool {
     v.is_finite() && v.abs() < 1e6
 }
 
+/// A kurbo path as a krilla path (equation shapes); `None` when it holds non-finite points.
+fn bez_path(p: &kurbo::BezPath) -> Option<Path> {
+    use kurbo::PathEl;
+    let f = |q: kurbo::Point| (q.x as f32, q.y as f32);
+    let mut pb = PathBuilder::new();
+    for el in p.elements() {
+        match *el {
+            PathEl::MoveTo(a) => {
+                let (x, y) = f(a);
+                if !(ok(x) && ok(y)) {
+                    return None;
+                }
+                pb.move_to(x, y);
+            }
+            PathEl::LineTo(a) => {
+                let (x, y) = f(a);
+                if !(ok(x) && ok(y)) {
+                    return None;
+                }
+                pb.line_to(x, y);
+            }
+            PathEl::QuadTo(a, b) => {
+                let (x0, y0, x1, y1) = (f(a).0, f(a).1, f(b).0, f(b).1);
+                if ![x0, y0, x1, y1].iter().all(|v| ok(*v)) {
+                    return None;
+                }
+                pb.quad_to(x0, y0, x1, y1);
+            }
+            PathEl::CurveTo(a, b, c) => {
+                let v = [f(a), f(b), f(c)];
+                if !v.iter().all(|(x, y)| ok(*x) && ok(*y)) {
+                    return None;
+                }
+                pb.cubic_to(v[0].0, v[0].1, v[1].0, v[1].1, v[2].0, v[2].1);
+            }
+            PathEl::ClosePath => pb.close(),
+        }
+    }
+    pb.finish()
+}
+
 fn rect_path(r: &Rect) -> Option<Path> {
     if !(ok(r.x) && ok(r.y) && ok(r.w) && ok(r.h)) || r.w <= 0.0 || r.h <= 0.0 {
         return None;
@@ -559,6 +600,14 @@ impl Exporter<'_> {
                 }
                 s.set_fill(None);
                 s.set_stroke(None);
+            }
+            Draw::Path { path, color, alpha } => {
+                if let Some(p) = bez_path(path) {
+                    s.set_stroke(None);
+                    s.set_fill(Some(fill(*color, *alpha)));
+                    s.draw_path(&p);
+                    s.set_fill(None);
+                }
             }
             Draw::Mark { .. } => {}
         }

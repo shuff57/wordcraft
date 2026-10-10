@@ -59,7 +59,8 @@ the icon art).
 | Review (spelling, grammar, thesaurus, comments, track changes, compare, protect) | Good; comment balloons in the margin; no track-changes balloons | 75% |
 | Mailings (mail merge, rules, preview, envelopes, labels) | Working | 70% |
 | Pictures & shapes (insert, size, crop, recolour, effects, styles, float position) | Text wraps around floats (rectangular); text boxes render their text; no tight/contour wrap, no rotation handles | 55% |
-| Draw tab (ink), SmartArt, charts, 3D models, equations editor | Not started / linear equations only | 5% |
+| Equation editor (OMML, 2D layout) | Done so far: `wordcraft-math` crate (tree, OMML read/write, linear format, templates, editor state machine); OMML kept and round-tripped in DOCX; 2D TeX-style layout (fractions, radicals, scripts, n-ary limits, delimiters, matrices) inline and centred display; commands `insert.equation`, `equation.update/get/templates/type/fromLinear`. Not yet: the equation dialog and on-canvas editor in the UI. Known limits: stored OMML is not schema-validated on write (an element such as `<xmlns:q/>` can yield an illegal `xmlns:ns1` binding, and schema-invalid content passes through verbatim); equations never wrap across lines | 60% |
+| Draw tab (ink), SmartArt, charts, 3D models | Not started | 0% |
 | File formats: DOCX read/write | Good (Word opens our files); charts/SmartArt/OLE dropped; untested on a real-world corpus | 75% |
 | File formats: PDF, ODT, RTF, HTML, Markdown, TXT | Working | 70% |
 | View modes (print, web, draft, read, focus, zoom, navigation pane) | Working | 70% |
@@ -76,7 +77,7 @@ the icon art).
    grouping, z-order polish, track-changes balloons and formatting revisions.
 3. **Draw tab / ink** (≈15 h).
 4. **Charts (own renderer) and SmartArt-style diagrams** (≈20 h).
-5. **Equation editor (OMML read/write, 2D layout)** (≈15 h).
+5. **Equation editor (OMML read/write, 2D layout)** (≈15 h; model, DOCX round trip, 2D layout and the `equation.*` commands are in; the dialog and canvas editor remain, ≈5 h). Any command or MCP param that passes `omml` through must first round-trip it through `wordcraft-math` (`equation.update` and `insert.equation` do).
 6. **Dialog depth**: every Word dialog with all its options (Font, Paragraph, Tabs, Borders and
    Shading, Page Setup, Styles, Columns, Index/TOC options, Mail Merge wizard, Options panes) (≈20 h).
 7. **Accessibility (screen readers), localisation, RTL and complex scripts** (≈15 h).

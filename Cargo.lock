@@ -4908,6 +4908,7 @@ dependencies = [
  "wordcraft-formats",
  "wordcraft-geom",
  "wordcraft-layout",
+ "wordcraft-math",
  "wordcraft-pdf",
  "wordcraft-proof",
  "wordcraft-render",
@@ -4948,6 +4949,7 @@ dependencies = [
 name = "wordcraft-layout"
 version = "0.3.0"
 dependencies = [
+ "kurbo",
  "log",
  "serde",
  "serde_json",
@@ -4956,6 +4958,7 @@ dependencies = [
  "wordcraft-doc",
  "wordcraft-fonts",
  "wordcraft-geom",
+ "wordcraft-math",
  "wordcraft-proof",
 ]
 

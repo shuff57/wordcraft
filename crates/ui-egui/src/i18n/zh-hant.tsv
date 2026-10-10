@@ -220,6 +220,11 @@
 	Enter page number:	輸入頁碼：
 	Envelopes	信封
 	Equation	方程式
+	Edit Equation	編輯方程式
+	Equation Templates	方程式範本
+	Get Equation	取得方程式
+	Linear Text to Equation	線性文字轉方程式
+	Type into Equation	在方程式中輸入
 	Eraser	橡皮擦
 	Even Page	偶數頁
 	Every command is available to scripts and AI agents: run `wordcraft-cli mcp` for an MCP server, or start the app with `--control <port>` for the JSON control channel.	每個命令都可供指令碼和 AI 代理程式使用：執行 `wordcraft-cli mcp` 啟動 MCP 伺服器，或以 `--control <port>` 啟動應用程式以開啟 JSON 控制通道。

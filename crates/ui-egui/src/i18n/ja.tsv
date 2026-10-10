@@ -219,6 +219,11 @@
 	Enter page number:	ページ番号を入力:
 	Envelopes	封筒
 	Equation	数式
+	Edit Equation	数式を編集
+	Equation Templates	数式テンプレート
+	Get Equation	数式を取得
+	Linear Text to Equation	線形テキストから数式へ
+	Type into Equation	数式に入力
 	Eraser	消しゴム
 	Even Page	偶数ページから開始
 	Every command is available to scripts and AI agents: run `wordcraft-cli mcp` for an MCP server, or start the app with `--control <port>` for the JSON control channel.	すべてのコマンドはスクリプトと AI エージェントから利用できます。`wordcraft-cli mcp` で MCP サーバーを起動するか、`--control <port>` を付けてアプリを起動すると JSON 制御チャネルが使えます。

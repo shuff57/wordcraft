@@ -61,6 +61,12 @@ pub enum Draw {
         stroke: Option<Rgb>,
         stroke_width: f32,
     },
+    /// A filled vector shape in page coordinates (radical sign, delimiter, big operator of an equation).
+    Path {
+        path: std::sync::Arc<kurbo::BezPath>,
+        color: Rgb,
+        alpha: f32,
+    },
     /// A formatting mark (¶ · → ↵) in the UI's mark colour.
     Mark {
         x: f32,
@@ -394,6 +400,11 @@ fn lines(
                 Some(InlineObject::Image { media, crop, .. }) => out.push(Draw::Image { rect, media: media.clone(), crop: *crop, alpha }),
                 Some(InlineObject::Shape { kind, fill, stroke, stroke_width, .. }) => {
                     out.push(Draw::Shape { rect, kind: *kind, fill: *fill, stroke: *stroke, stroke_width: *stroke_width })
+                }
+                Some(InlineObject::Equation { .. }) => {
+                    if let (Some(e), Some(st)) = (pl.eq_at(k), pl.styles.get(c.style as usize)) {
+                        crate::math::emit(&e.bx, (cx + e.dx) as f64, (base - st.shift) as f64, text_color(&st.rc.color, None), alpha, out);
+                    }
                 }
                 _ => {}
             }

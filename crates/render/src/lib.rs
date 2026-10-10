@@ -300,6 +300,15 @@ fn draw(ctx: &mut RenderContext, doc: &Document, it: &Draw, view: Affine, visibl
                 }
             }
         }
+        Draw::Path { path, color: c, alpha } => {
+            let b = kurbo::Shape::bounding_box(path.as_ref());
+            if !(b.x0.is_finite() && b.y0.is_finite() && b.x1.is_finite() && b.y1.is_finite()) || !b.overlaps(*visible) {
+                return;
+            }
+            ctx.set_transform(view);
+            ctx.set_paint(color(*c, *alpha));
+            ctx.fill_path(path.as_ref());
+        }
         Draw::Mark { x, baseline, size, ch } => {
             let face = wordcraft_fonts::word::resolve("Source Sans 3", false, false).face;
             let gid = face.glyph_for(*ch);

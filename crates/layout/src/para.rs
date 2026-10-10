@@ -138,6 +138,33 @@ pub struct ParaLayout {
     pub drop_cap: Option<(usize, u8, f32)>,
     /// Clusters after which the line may break with a hyphen (soft hyphens, auto hyphenation), sorted.
     pub hyph_after: Vec<u32>,
+    /// Laid-out equations, by cluster index (ascending).
+    pub eqs: Vec<EqAtom>,
+}
+
+/// An equation laid out as one cluster of a paragraph.
+#[derive(Clone)]
+pub struct EqAtom {
+    /// Index of the equation's cluster in `ParaLayout::clusters`.
+    pub cluster: usize,
+    pub bx: Arc<crate::math::MathBox>,
+    /// Offset of the formula inside the cluster's advance (display math is centred), points.
+    pub dx: f32,
+    /// Display equation: alone on its line.
+    pub display: bool,
+}
+
+impl std::fmt::Debug for EqAtom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "EqAtom({}, dx={}, display={})", self.cluster, self.dx, self.display)
+    }
+}
+
+impl ParaLayout {
+    /// The laid-out equation of cluster `k`.
+    pub fn eq_at(&self, k: usize) -> Option<&EqAtom> {
+        self.eqs.binary_search_by_key(&k, |e| e.cluster).ok().and_then(|i| self.eqs.get(i))
+    }
 }
 
 /// Inputs that change a paragraph's layout beyond its own content.
@@ -359,6 +386,7 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
     let mut has_page_fields = false;
     let mut notes = Vec::new();
     let mut obj_index = 0usize;
+    let mut eqs: Vec<EqAtom> = Vec::new();
     // Drop cap: the first character, sized so its capital spans `lines` lines.
     let drop_first = (rp.drop_cap > 0)
         .then(|| p.text.chars().next())
@@ -468,11 +496,28 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
                             b.shape_atomic(&num, start, end, &Arc::new(sup));
                             notes.push((b.clusters.len().saturating_sub(1), *id));
                         }
-                        Some(InlineObject::Equation { linear, .. }) => {
-                            let mut eq = (*rc).clone();
-                            eq.italic = true;
-                            eq.font = "Cambria Math".into();
-                            b.shape_atomic(linear, start, end, &Arc::new(eq));
+                        Some(InlineObject::Equation { linear, display, omml }) => {
+                            let maxw = (env.width - rp.indent_left.max(0.0) - rp.indent_right.max(0.0)).max(18.0);
+                            let base = wordcraft_fonts::word::resolve("Cambria Math", rc.bold, false).face;
+                            let src = match omml {
+                                Some(x) => crate::math::Src::Omml(x),
+                                None => crate::math::Src::Linear(linear),
+                            };
+                            let (bx, disp, jc) = crate::math::layout_cached(src, &base, rc.draw_size() as f64, rc.bold, *display);
+                            let w = (bx.width() as f32).clamp(0.0, 1e5);
+                            let (adv, dx) = if disp {
+                                let adv = w.max(maxw);
+                                let dx = match jc.as_deref() {
+                                    Some("left") => 0.0,
+                                    Some("right") => adv - w,
+                                    _ => (adv - w) / 2.0,
+                                };
+                                (adv, dx)
+                            } else {
+                                (w, 0.0)
+                            };
+                            eqs.push(EqAtom { cluster: b.clusters.len(), bx: bx.clone(), dx, display: disp });
+                            push(&mut b, ClKind::Object(k), adv, (bx.ascent() as f32).clamp(1.0, 1e5));
                         }
                         Some(InlineObject::Opaque { text, .. }) => b.shape_atomic(text, start, end, &rc),
                         _ => push(&mut b, ClKind::Marker, 0.0, 0.0),
@@ -528,7 +573,16 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
         Label { text, style, glyphs, x: 0.0, width: x }
     });
 
+    // A display equation sits on a line of its own: a break may follow the cluster before it.
+    for e in &eqs {
+        if e.display
+            && let Some(c) = e.cluster.checked_sub(1).and_then(|k| b.clusters.get_mut(k))
+        {
+            c.break_after = true;
+        }
+    }
     let mut pl = ParaLayout {
+        eqs,
         rp,
         styles: b.styles,
         glyphs: b.glyphs,
@@ -834,7 +888,7 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u16, suffix: Opti
             }
             if let Some(st) = pl.styles.get(c.style as usize) {
                 let (a, d) = if matches!(c.kind, ClKind::Object(_)) && c.obj_h > 0.0 {
-                    (c.obj_h, 0.0)
+                    (c.obj_h, pl.eq_at(c0 + k).map_or(0.0, |e| e.bx.descent() as f32))
                 } else {
                     (st.ascent + st.shift.max(0.0), st.descent + (-st.shift).max(0.0))
                 };
