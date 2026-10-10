@@ -750,6 +750,12 @@ mod tests {
         assert_eq!(g["display"], true);
         s.run("edit.undo", &json!({})).unwrap();
         assert_eq!(equation_count(&s), 0);
+        // The HTML half of equaSHion's Copy MathML, should a paste deliver it as the text.
+        let html = format!("<html><body><!--StartFragment-->{QUADRATIC_MATHML}<!--EndFragment--></body></html>");
+        let r = s.run("edit.paste", &json!({"text": html})).unwrap();
+        assert_eq!(r["format"], "MathML");
+        assert_eq!(equation_count(&s), 1);
+        s.run("edit.undo", &json!({})).unwrap();
         for (text, display) in [
             ("$x=\\frac{-b\\pm\\sqrt{b^2-4ac}}{2a}$", false),
             ("\\(x=\\frac{-b\\pm\\sqrt{b^2-4ac}}{2a}\\)", false),

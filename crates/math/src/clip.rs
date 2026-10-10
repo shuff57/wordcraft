@@ -31,6 +31,9 @@ impl ClipKind {
 /// the parsed equation, or why it could not be read (the caller pastes the text and says so).
 pub fn equation_from_clipboard(text: &str) -> Option<(ClipKind, Result<Math, String>)> {
     let t = text.trim();
+    // An HTML clipboard fragment whose only content is the equation (as browsers and the
+    // equaSHion tool write it) reads like the bare element.
+    let t = html_fragment(t).filter(|f| matches!(root_local(f), Some((_, "oMath" | "oMathPara" | "math")))).unwrap_or(t);
     match root_local(t) {
         Some((_, "oMath" | "oMathPara")) => return Some((ClipKind::Omml, omml(t))),
         Some((_, "math")) => return Some((ClipKind::MathMl, from_mathml(t))),
@@ -38,6 +41,22 @@ pub fn equation_from_clipboard(text: &str) -> Option<(ClipKind, Result<Math, Str
     }
     let (inner, display) = latex_inner(t)?;
     Some((ClipKind::Latex, latex(inner, display)))
+}
+
+/// The content of an HTML clipboard fragment: between `<!--StartFragment-->` and
+/// `<!--EndFragment-->`, else inside `<body>`, trimmed. `None` when the text is not HTML.
+fn html_fragment(t: &str) -> Option<&str> {
+    if let (Some(a), Some(b)) = (t.find("<!--StartFragment-->"), t.rfind("<!--EndFragment-->")) {
+        return t.get(a + "<!--StartFragment-->".len()..b).map(str::trim);
+    }
+    let lower = t.chars().take(16).collect::<String>().to_ascii_lowercase();
+    if !(lower.starts_with("<html") || lower.starts_with("<!doctype html") || lower.starts_with("<body")) {
+        return None;
+    }
+    let open = t.find("<body")?;
+    let start = open + t.get(open..)?.find('>')? + 1;
+    let end = t.rfind("</body>")?;
+    t.get(start..end).map(str::trim)
 }
 
 /// Prefix and local name of the first element, after an XML declaration, processing
@@ -136,5 +155,18 @@ mod tests {
         assert!(equation_from_clipboard(&long).unwrap().1.is_err());
         assert!(equation_from_clipboard("<!-- unterminated").is_none());
         assert!(equation_from_clipboard("<?xml").is_none());
+        // HTML clipboard fragments holding only the equation.
+        let html = "<html><body><!--StartFragment--><math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"block\"><mi>x</mi></math><!--EndFragment--></body></html>";
+        let (k, r) = equation_from_clipboard(html).unwrap();
+        assert_eq!(k, ClipKind::MathMl);
+        assert!(r.unwrap().para);
+        let (k, r) = equation_from_clipboard("<html><body>\n<m:oMath><m:r><m:t>y</m:t></m:r></m:oMath>\n</body></html>").unwrap();
+        assert_eq!(k, ClipKind::Omml);
+        assert!(r.is_ok());
+        // Other HTML, or an equation with other content around it, stays text.
+        assert!(equation_from_clipboard("<html><body><!--StartFragment--><p>hi</p><!--EndFragment--></body></html>").is_none());
+        assert!(equation_from_clipboard("<html><body><!--StartFragment-->see <math><mi>x</mi></math><!--EndFragment--></body></html>").is_none());
+        assert!(equation_from_clipboard("<!--EndFragment--><!--StartFragment-->").is_none());
+        assert!(equation_from_clipboard("<html><body>").is_none());
     }
 }

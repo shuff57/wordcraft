@@ -206,6 +206,8 @@ fn accent_for(c: char) -> Option<char> {
         '→' | '⃗' => '\u{20D7}',
         'ˇ' | '\u{30C}' => '\u{30C}',
         '´' | '\u{301}' => '\u{301}',
+        // `\bar`: the combining overline (equaSHion, OMML) or a macron (MathJax).
+        '¯' | '\u{305}' => '\u{305}',
         '`' | '\u{300}' => '\u{300}',
         '˘' | '\u{306}' => '\u{306}',
         _ => return None,
@@ -213,7 +215,7 @@ fn accent_for(c: char) -> Option<char> {
 }
 
 fn is_bar(c: char) -> bool {
-    matches!(c, '¯' | '‾' | '_' | '\u{305}' | '\u{332}' | '−' | '-')
+    matches!(c, '‾' | '_' | '\u{332}' | '−' | '-')
 }
 
 fn is_group(c: char) -> bool {
@@ -462,7 +464,7 @@ mod tests {
         // Two separate groups are not one fence.
         let r = m("<mo>(</mo><mi>a</mi><mo>)</mo><mo>+</mo><mo>(</mo><mi>b</mi><mo>)</mo>").unwrap();
         assert!(matches!(r.body.as_slice(), [Node::Text(_)]), "{r:?}");
-        let r = m("<mover><mi>x</mi><mo>^</mo></mover><mover><mi>y</mi><mo>¯</mo></mover><munder><mi>lim</mi><mrow><mi>n</mi><mo>→</mo><mi>∞</mi></mrow></munder>").unwrap();
+        let r = m("<mover><mi>x</mi><mo>^</mo></mover><mover><mi>y</mi><mo>‾</mo></mover><munder><mi>lim</mi><mrow><mi>n</mi><mo>→</mo><mi>∞</mi></mrow></munder>").unwrap();
         assert!(
             matches!(r.body.as_slice(), [Node::Accent { ch: '\u{302}', .. }, Node::Bar { top: true, .. }, Node::Limit { lower: true, .. }]),
             "{r:?}"
