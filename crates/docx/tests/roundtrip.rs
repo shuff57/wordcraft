@@ -838,3 +838,93 @@ fn equation_without_omml_still_writes_linear_text() {
     assert!(lin.contains("x+1"), "{lin}");
     assert!(omml.is_some_and(|x| x.contains("oMathPara")));
 }
+
+/// document.xml of a written docx.
+fn document_xml(bytes: &[u8]) -> String {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("word/document.xml").unwrap(), &mut xml).unwrap();
+    xml
+}
+
+/// Strict check: well-formed, balanced, no duplicate attributes, every prefix bound.
+fn assert_well_formed(xml: &str) {
+    use quick_xml::events::Event;
+    use quick_xml::name::ResolveResult;
+    let mut r = quick_xml::reader::NsReader::from_str(xml);
+    let mut depth = 0i64;
+    loop {
+        let (res, ev) = r.read_resolved_event().unwrap_or_else(|e| panic!("not well-formed: {e}\n{xml}"));
+        match ev {
+            Event::Start(ref e) | Event::Empty(ref e) => {
+                assert!(!matches!(res, ResolveResult::Unbound | ResolveResult::Unknown(_)), "unbound element prefix in {xml}");
+                for a in e.attributes() {
+                    let a = a.unwrap_or_else(|e| panic!("bad attribute: {e}\n{xml}"));
+                    let (ar, _) = r.resolve_attribute(a.key);
+                    assert!(!matches!(ar, ResolveResult::Unknown(_)), "unbound attribute prefix in {xml}");
+                }
+                if matches!(ev, Event::Start(_)) {
+                    depth += 1;
+                }
+            }
+            Event::End(_) => depth -= 1,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    assert_eq!(depth, 0, "unbalanced: {xml}");
+}
+
+fn doc_with_omml(x: &str) -> Document {
+    let mut p = Paragraph::with_text("a", CharProps::default());
+    let end = p.len();
+    p.insert_object(end, InlineObject::Equation { linear: "fallback".into(), display: false, omml: Some(x.into()) }, &CharProps::default()).unwrap();
+    let mut d = Document::new();
+    d.body = vec![para_block(p), para_block(Paragraph::with_text("after", CharProps::default()))];
+    d
+}
+
+#[test]
+fn omml_with_foreign_namespaces_and_attributes_stays_well_formed() {
+    let x = r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:p="urn:p" xmlns:q="urn:q" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><m:r xsi:type="foo" p:val="1" q:val="2"><p:ext/><m:t>x</m:t></m:r></m:oMath>"#;
+    let r = rt(&{
+        let mut d = Document::new();
+        let mut p = Paragraph::new();
+        p.insert_object(0, InlineObject::Equation { linear: "x".into(), display: false, omml: Some(x.into()) }, &CharProps::default()).unwrap();
+        d.body = vec![para_block(p)];
+        d
+    });
+    let (_, _, stored) = eq_of(paras(&r)[0], 0);
+    let stored = stored.unwrap();
+    assert_well_formed(&stored);
+    assert!(stored.contains("urn:p") && stored.contains("urn:q") && stored.contains("XMLSchema-instance"), "{stored}");
+    assert!(!stored.contains("<ext"), "{stored}");
+    // Read -> write -> read is stable and the saved file is well-formed.
+    let bytes = wordcraft_docx::write(&r).unwrap();
+    assert_well_formed(&document_xml(&bytes));
+    let r2 = wordcraft_docx::read(&bytes).unwrap();
+    assert_eq!(eq_of(paras(&r2)[0], 0).2.as_deref(), Some(stored.as_str()));
+}
+
+#[test]
+fn hostile_omml_never_corrupts_document_xml() {
+    let m = "http://schemas.openxmlformats.org/officeDocument/2006/math";
+    let hostile = [
+        "<m:oMath".to_string(),
+        format!("<m:oMath xmlns:m=\"{m}\"/></w:p><w:p><w:r><w:t>INJECTED</w:t></w:r></w:p><m:oMath xmlns:m=\"{m}\"/>"),
+        format!("<m:oMath xmlns:m=\"{m}\"><m:r></m:oMath>"),
+        "<w:p/>".to_string(),
+        "garbage".to_string(),
+        "\u{0}<m:oMath/>".to_string(),
+        format!("<m:oMath xmlns:m=\"{m}\" a=\"1\" a=\"2\"/>"),
+        format!("<m:oMath xmlns:m=\"{m}\" bad:attr=\"1\"/>"),
+    ];
+    for h in hostile {
+        let bytes = wordcraft_docx::write(&doc_with_omml(&h)).unwrap();
+        let xml = document_xml(&bytes);
+        assert_well_formed(&xml);
+        assert!(!xml.contains("INJECTED"), "spliced content for {h:?}");
+        let r = wordcraft_docx::read(&bytes).unwrap();
+        assert_eq!(paras(&r).len(), 2, "paragraph count changed for {h:?}");
+    }
+}

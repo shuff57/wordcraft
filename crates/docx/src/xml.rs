@@ -2,7 +2,7 @@
 //!
 //! Element and attribute names are rewritten to *canonical prefixes* by namespace URI (`w:p`,
 //! `r:id`, `a:blip`…), so the reader doesn't care which prefixes a producer chose. Names in
-//! unknown namespaces keep their local name behind a `?:` prefix.
+//! unknown namespaces are kept in Clark form (`{uri}local`) so they can be written back.
 
 use quick_xml::events::Event;
 use quick_xml::name::ResolveResult;
@@ -56,13 +56,35 @@ const STRICT: &[(&str, &str)] = &[
     ("m", "http://purl.oclc.org/ooxml/officeDocument/math"),
 ];
 
-fn prefix_for(uri: &[u8]) -> &'static str {
-    for (p, u) in NAMESPACES.iter().chain(OTHER_NAMESPACES).chain(STRICT) {
-        if u.as_bytes() == uri {
-            return p;
+fn prefix_for(uri: &[u8]) -> Option<&'static str> {
+    NAMESPACES.iter().chain(OTHER_NAMESPACES).chain(STRICT).find(|(_, u)| u.as_bytes() == uri).map(|(p, _)| *p)
+}
+
+/// A resolved namespace: a canonical prefix, or the raw URI of an unknown namespace.
+enum Qual {
+    Known(&'static str),
+    Unknown(String),
+}
+
+impl Qual {
+    fn join(&self, local: &str) -> String {
+        match self {
+            Qual::Known(p) => format!("{p}:{local}"),
+            Qual::Unknown(u) => format!("{{{u}}}{local}"),
         }
     }
-    "?"
+}
+
+fn qualify(uri: &[u8]) -> Qual {
+    match prefix_for(uri) {
+        Some(p) => Qual::Known(p),
+        None => Qual::Unknown(String::from_utf8_lossy(uri).into_owned()),
+    }
+}
+
+/// Split a Clark-form name (`{uri}local`) into its parts.
+fn clark(n: &str) -> Option<(&str, &str)> {
+    n.strip_prefix('{').and_then(|r| r.split_once('}'))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -157,42 +179,77 @@ impl El {
     /// Serialise this element (and its subtree) as standalone XML: the root declares the
     /// namespaces its names use, so the string parses on its own.
     pub fn to_xml(&self) -> String {
-        let mut prefixes: Vec<String> = Vec::new();
-        fn collect(e: &El, out: &mut Vec<String>, depth: usize) {
+        // Namespaces used by the subtree: known prefixes by table, unknown URIs get fresh `nsN`.
+        let mut known: Vec<&'static str> = Vec::new();
+        let mut unknown: Vec<String> = Vec::new();
+        fn uri_of(p: &str) -> Option<(&'static str, &'static str)> {
+            NAMESPACES.iter().chain(OTHER_NAMESPACES).find(|(k, _)| *k == p).copied()
+        }
+        fn collect(e: &El, known: &mut Vec<&'static str>, unknown: &mut Vec<String>, depth: usize) {
             if depth > MAX_DEPTH {
                 return;
             }
             for n in std::iter::once(e.name.as_str()).chain(e.attrs.iter().map(|(k, _)| k.as_str())) {
-                if let Some((p, _)) = n.split_once(':')
-                    && !out.iter().any(|x| x == p)
+                if let Some((u, _)) = clark(n) {
+                    if !unknown.iter().any(|x| x == u) {
+                        unknown.push(u.to_string());
+                    }
+                } else if let Some((p, _)) = n.split_once(':')
+                    && let Some((k, _)) = uri_of(p)
+                    && !known.contains(&k)
                 {
-                    out.push(p.to_string());
+                    known.push(k);
                 }
             }
             for c in e.els() {
-                collect(c, out, depth + 1);
+                collect(c, known, unknown, depth + 1);
             }
         }
-        collect(self, &mut prefixes, 0);
+        collect(self, &mut known, &mut unknown, 0);
         let mut decls = String::new();
-        for p in &prefixes {
-            if let Some((_, uri)) = NAMESPACES.iter().find(|(k, _)| k == p) {
-                decls.push_str(&format!(" xmlns:{p}=\"{uri}\""));
+        for p in &known {
+            if *p == "xml" {
+                continue;
+            }
+            if let Some((_, uri)) = uri_of(p) {
+                decls.push_str(&format!(" xmlns:{p}=\"{}\"", esc(uri)));
             }
         }
-        fn qname(n: &str) -> &str {
-            n.strip_prefix("?:").unwrap_or(n)
+        for (i, u) in unknown.iter().enumerate() {
+            decls.push_str(&format!(" xmlns:ns{}=\"{}\"", i + 1, esc(u)));
         }
-        fn go(e: &El, o: &mut String, decls: &str, depth: usize) {
+        // Write a name: Clark names get their generated prefix; everything else is kept, but
+        // only if it is a well-formed QName whose prefix is declared.
+        let qname = |n: &str| -> Option<String> {
+            if let Some((u, l)) = clark(n) {
+                let i = unknown.iter().position(|x| x == u)?;
+                return Some(format!("ns{}:{l}", i + 1));
+            }
+            if let Some((p, _)) = n.split_once(':')
+                && p != "xml"
+                && !known.contains(&p)
+            {
+                return None;
+            }
+            Some(n.to_string())
+        };
+        fn go(e: &El, o: &mut String, decls: &str, depth: usize, q: &dyn Fn(&str) -> Option<String>) {
+            let name = q(&e.name).unwrap_or_else(|| e.local().to_string());
             o.push('<');
-            o.push_str(qname(&e.name));
+            o.push_str(&name);
             o.push_str(decls);
+            let mut seen: Vec<String> = Vec::new();
             for (k, v) in &e.attrs {
+                let Some(k) = q(k) else { continue };
+                if seen.contains(&k) {
+                    continue;
+                }
                 o.push(' ');
-                o.push_str(qname(k));
+                o.push_str(&k);
                 o.push_str("=\"");
                 o.push_str(&esc(v));
                 o.push('"');
+                seen.push(k);
             }
             if e.kids.is_empty() || depth > MAX_DEPTH {
                 o.push_str("/>");
@@ -202,20 +259,23 @@ impl El {
             for n in &e.kids {
                 match n {
                     Node::Text(t) => o.push_str(&esc(t)),
-                    Node::El(c) => go(c, o, "", depth + 1),
+                    Node::El(c) => go(c, o, "", depth + 1, q),
                 }
             }
             o.push_str("</");
-            o.push_str(qname(&e.name));
+            o.push_str(&name);
             o.push('>');
         }
         let mut out = String::new();
-        go(self, &mut out, &decls, 0);
+        go(self, &mut out, &decls, 0, &qname);
         out
     }
     /// Local part of the name.
     pub fn local(&self) -> &str {
-        self.name.rsplit(':').next().unwrap_or(&self.name)
+        match clark(&self.name) {
+            Some((_, l)) => l,
+            None => self.name.rsplit(':').next().unwrap_or(&self.name),
+        }
     }
 }
 
@@ -242,7 +302,7 @@ pub fn parse(bytes: &[u8]) -> Result<El, DocxError> {
         buf.clear();
         let (res, ev) = r.read_resolved_event_into(&mut buf).map_err(|e| DocxError::Xml(e.to_string()))?;
         let el_prefix = match &res {
-            ResolveResult::Bound(ns) => Some(prefix_for(ns.as_ref())),
+            ResolveResult::Bound(ns) => Some(qualify(ns.as_ref())),
             _ => None,
         };
         match ev {
@@ -253,7 +313,7 @@ pub fn parse(bytes: &[u8]) -> Result<El, DocxError> {
                 }
                 let local = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
                 let name = match el_prefix {
-                    Some(p) => format!("{p}:{local}"),
+                    Some(p) => p.join(&local),
                     None => local,
                 };
                 let mut el = El { name, attrs: Vec::new(), kids: Vec::new() };
@@ -267,7 +327,7 @@ pub fn parse(bytes: &[u8]) -> Result<El, DocxError> {
                     let (ares, alocal) = r.resolve_attribute(key);
                     let alocal = String::from_utf8_lossy(alocal.as_ref()).into_owned();
                     let aname = match ares {
-                        ResolveResult::Bound(ns) => format!("{}:{alocal}", prefix_for(ns.as_ref())),
+                        ResolveResult::Bound(ns) => qualify(ns.as_ref()).join(&alocal),
                         _ => alocal,
                     };
                     let val = match a.unescape_value() {
@@ -476,5 +536,19 @@ mod tests {
     #[test]
     fn escapes() {
         assert_eq!(esc("a<b&\"\u{1}"), "a&lt;b&amp;&quot;");
+    }
+
+    #[test]
+    fn to_xml_keeps_unknown_namespaces_and_is_well_formed() {
+        let x = br#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:p="urn:p" xmlns:q="urn:q" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><m:r xsi:type="foo" p:val="1" q:val="2"><p:ext/></m:r></m:oMath>"#;
+        let e = parse(x).unwrap();
+        let out = e.to_xml();
+        let again = parse(out.as_bytes()).unwrap();
+        assert_eq!(again, e, "{out}");
+        assert!(out.contains("xmlns:xsi="));
+        assert!(!out.contains("<ext"));
+        assert_eq!(again.find("{urn:p}ext").map(|e| e.local()), Some("ext"));
+        // val attributes stay distinct
+        assert_eq!(out.matches("val=").count(), 2);
     }
 }

@@ -286,9 +286,14 @@ impl Writer<'_> {
                 }
             }
             InlineObject::Equation { linear, display, omml } => {
-                // Stored OMML goes back untouched (its root declares the m namespace itself).
-                if let Some(x) = omml.as_deref().filter(|x| !x.trim().is_empty()) {
-                    w.raw(x);
+                // Stored OMML is untrusted (a deserialised or hand-built model can hold anything):
+                // it is parsed and re-serialised from the tree, so only one well-formed
+                // m:oMath / m:oMathPara element is ever written. Anything else falls back to
+                // the linear text.
+                let safe =
+                    omml.as_deref().and_then(|x| crate::xml::parse(x.as_bytes()).ok()).filter(|e| e.name == "m:oMath" || e.name == "m:oMathPara");
+                if let Some(e) = safe {
+                    w.raw(&e.to_xml());
                 } else {
                     if *display {
                         w.open("m:oMathPara", &[]);
