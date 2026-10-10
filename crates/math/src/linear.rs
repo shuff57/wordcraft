@@ -229,6 +229,38 @@ pub fn from_linear(s: &str) -> Math {
     Math::new(p.seq())
 }
 
+/// Backslash commands the typed-text parser did not know: they stay in the equation as literal
+/// text (so nothing typed is lost) and are listed here so a caller can report them. Each name
+/// appears once, in order of first use; the walk is iterative and bounded.
+pub fn unknown_commands(m: &Math) -> Vec<String> {
+    const MAX_NAMES: usize = 32;
+    let mut out: Vec<String> = Vec::new();
+    let mut stack: Vec<&Seq> = vec![&m.body];
+    let mut budget = 1_000_000usize;
+    while let Some(seq) = stack.pop() {
+        for n in seq.iter().rev() {
+            budget = budget.saturating_sub(1);
+            if budget == 0 {
+                return out;
+            }
+            stack.extend(crate::children(n.bare()));
+        }
+        for n in seq {
+            if let Node::Text(t) = n.bare() {
+                let mut rest = t.as_str();
+                while let Some(i) = rest.find('\\') {
+                    rest = rest.get(i + 1..).unwrap_or("");
+                    let name: String = rest.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+                    if !name.is_empty() && out.len() < MAX_NAMES && !out.contains(&name) {
+                        out.push(name);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 impl Parser {
     fn peek(&self) -> Option<char> {
         self.c.get(self.pos).copied()
@@ -474,7 +506,7 @@ impl Parser {
         }
         let w = self.word();
         match w.as_str() {
-            "frac" | "dfrac" | "tfrac" => {
+            "frac" | "dfrac" | "tfrac" | "cfrac" => {
                 let num = self.frac_arg();
                 let den = self.frac_arg();
                 out.push(Node::Frac { num, den });

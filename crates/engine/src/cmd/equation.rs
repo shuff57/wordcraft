@@ -135,7 +135,7 @@ fn insert_equation(s: &mut Session, p: &Value) -> CmdResult {
     let obj = InlineObject::Equation { linear: linear.clone(), display: m.para, omml: Some(omml.clone()) };
     let end = s.doc.insert_object(&at, obj, &props)?;
     s.sel = Selection::caret(end);
-    Ok(json!({"pos": pos_json(&at), "omml": omml, "linear": linear, "display": m.para}))
+    Ok(json!({"pos": pos_json(&at), "omml": omml, "linear": linear, "display": m.para, "warnings": warnings(&m)}))
 }
 
 /// Every equation in the body, in document order, as (position of its object character, object).
@@ -205,11 +205,41 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         m.para = *display;
     }
     let (omml, linear) = payload(&m);
-    let para = s.doc.para_mut(at.story, &at.path)?;
-    let obj = para.object_at_mut(at.off).ok_or_else(|| CmdError::Failed("the equation is gone".into()))?;
-    *obj = InlineObject::Equation { linear: linear.clone(), display: m.para, omml: Some(omml.clone()) };
-    para.touch();
-    Ok(json!({"pos": pos_json(&at), "omml": omml, "linear": linear, "display": m.para}))
+    let obj = InlineObject::Equation { linear: linear.clone(), display: m.para, omml: Some(omml.clone()) };
+    let mut tracked = false;
+    if s.doc.settings.track_changes {
+        // The old run's properties say who inserted it (own insertions are replaced in place,
+        // as for text) and carry the formatting over to the new equation.
+        let author = s.author.clone();
+        let old_props =
+            s.doc.para(at.story, &at.path).and_then(|q| q.run_ranges().find(|(r, _)| r.start <= at.off && at.off < r.end).map(|(_, c)| c.clone()));
+        if let Some(mut props) = old_props {
+            let own = props.ins.and_then(|i| s.doc.revisions.get(i as usize)).is_some_and(|rv| rv.author == author);
+            if !own {
+                let del = new_revision(s, RevisionKind::Delete);
+                let ins = new_revision(s, RevisionKind::Insert);
+                let end = at.off + OBJ.len_utf8();
+                let para = s.doc.para_mut(at.story, &at.path)?;
+                para.format(at.off, end, &|c| c.del = Some(del))?;
+                props.del = None;
+                props.ins = Some(ins);
+                para.insert_object(end, obj.clone(), &props)?;
+                tracked = true;
+            }
+        }
+    }
+    if !tracked {
+        let para = s.doc.para_mut(at.story, &at.path)?;
+        let slot = para.object_at_mut(at.off).ok_or_else(|| CmdError::Failed("the equation is gone".into()))?;
+        *slot = obj;
+        para.touch();
+    }
+    Ok(json!({"pos": pos_json(&at), "omml": omml, "linear": linear, "display": m.para, "tracked": tracked, "warnings": warnings(&m)}))
+}
+
+/// Typed commands the parser did not understand; they stay as literal text, so say so.
+fn warnings(m: &Math) -> Vec<String> {
+    wordcraft_math::unknown_commands(m).into_iter().map(|n| format!("unknown command \\{n}: kept as literal text")).collect()
 }
 
 fn describe(m: &Math) -> Value {
@@ -222,6 +252,7 @@ fn describe(m: &Math) -> Value {
         "linear": wordcraft_math::to_linear(m),
         "display": m.para,
         "tree": tree.unwrap_or(Value::Null),
+        "warnings": warnings(m),
     });
     if let (true, Some(o)) = (omitted, v.as_object_mut()) {
         o.insert("treeOmitted".into(), json!(true));
@@ -355,6 +386,20 @@ mod tests {
     }
 
     #[test]
+    fn unknown_commands_are_reported_and_cfrac_is_a_fraction() {
+        let mut s = session();
+        let r = s.run("equation.fromLinear", &json!({"linear": "1+\\cfrac{1}{x}+\\bogus y"})).unwrap();
+        assert!(r["omml"].as_str().unwrap().contains("<m:f>"), "cfrac parses as a fraction");
+        let w = r["warnings"].as_array().unwrap();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].as_str().unwrap().contains("bogus"));
+        let r = s.run("insert.equation", &json!({"linear": "\\alpha+\\nope"})).unwrap();
+        assert_eq!(r["warnings"].as_array().unwrap().len(), 1);
+        let r = s.run("equation.fromLinear", &json!({"linear": "x^2"})).unwrap();
+        assert!(r["warnings"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
     fn default_equation_is_pythagoras() {
         let mut s = session();
         s.run("insert.equation", &json!({})).unwrap();
@@ -474,6 +519,29 @@ mod tests {
     }
 
     #[test]
+    fn tracked_update_replaces_and_reject_restores() {
+        let mut s = session();
+        s.run("insert.equation", &json!({"linear": "y^2"})).unwrap();
+        let before = eq_at(&s, 0);
+        s.doc.settings.track_changes = true;
+        let r = s.run("equation.update", &json!({"linear": "y^3", "index": 0})).unwrap();
+        assert_eq!(r["tracked"], true);
+        assert!(s.doc.revisions.iter().any(|r| r.kind == wordcraft_doc::RevisionKind::Delete));
+        s.run("review.rejectAll", &json!({})).unwrap();
+        assert_eq!(eq_at(&s, 0), before, "reject restores the old equation");
+        s.run("edit.undo", &json!({})).unwrap();
+        s.run("review.acceptAll", &json!({})).unwrap();
+        assert!(eq_at(&s, 0).0.contains('3'));
+        assert_eq!(s.doc.para(StoryRef::Body, &wordcraft_doc::Path(vec![0])).unwrap().objects.len(), 1);
+        // Editing your own tracked insertion replaces it in place.
+        s.run("insert.equation", &json!({"linear": "q"})).unwrap();
+        let n = s.doc.revisions.len();
+        let r = s.run("equation.update", &json!({"linear": "w", "index": 1})).unwrap();
+        assert_eq!(r["tracked"], false);
+        assert_eq!(s.doc.revisions.len(), n);
+    }
+
+    #[test]
     fn tracked_insert_marks_the_equation() {
         let mut s = session();
         s.doc.settings.track_changes = true;
@@ -562,11 +630,14 @@ mod tests {
         ];
         for id in ["insert.equation", "equation.update", "equation.get", "equation.templates", "equation.type", "equation.fromLinear"] {
             for j in &junk {
-                let mut s = session();
-                s.run("insert.equation", &json!({"linear": "x/2"})).unwrap();
-                let _ = s.run(id, j);
-                s.clamp_selection();
-                let _ = s.layout();
+                for tracked in [false, true] {
+                    let mut s = session();
+                    s.run("insert.equation", &json!({"linear": "x/2"})).unwrap();
+                    s.doc.settings.track_changes = tracked;
+                    let _ = s.run(id, j);
+                    s.clamp_selection();
+                    let _ = s.layout();
+                }
             }
         }
     }

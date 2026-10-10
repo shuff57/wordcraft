@@ -224,6 +224,19 @@ enum Class {
     Punct,
 }
 
+/// Where a trailing differential (`dx`, `dt`...) starts in an operator's body: the last text
+/// node ends in `d` and one letter, with something before it.
+fn differential(s: &[Node]) -> Option<(usize, usize)> {
+    let i = s.len().checked_sub(1)?;
+    let Node::Text(t) = s.get(i)?.bare() else { return None };
+    let chars: Vec<char> = t.chars().collect();
+    let n = chars.len();
+    let d = n.checked_sub(2)?;
+    let (a, b) = (*chars.get(d)?, *chars.get(n - 1)?);
+    let before = d > 0 || i > 0;
+    (a == 'd' && b.is_alphabetic() && before && d.checked_sub(2).and_then(|k| chars.get(k)).is_none_or(|c| !c.is_alphabetic())).then_some((i, d))
+}
+
 fn classify(c: char) -> Class {
     match c {
         '=' | '<' | '>' | '\u{2264}' | '\u{2265}' | '\u{2260}' | '\u{2248}' | '\u{2261}' | '\u{223C}' | '\u{2245}' | '\u{2208}' | '\u{2209}'
@@ -364,6 +377,10 @@ struct Lay {
     wrap: f64,
     /// Parts of the top-level row after which it may break (after a binary operator or relation).
     brks: Vec<usize>,
+    /// The next row laid out is the body of a big operator (so a trailing `dx` takes a thin space).
+    nary_body: bool,
+    /// (node, character) in the row being laid out where a differential `dx` starts.
+    thin_at: Option<(usize, usize)>,
 }
 
 /// Ink box of a glyph in font units, y down: (x0, y0, x1, y1).
@@ -526,11 +543,14 @@ impl Lay {
         let mut marks: Vec<Mark> = vec![];
         let mut prev = Class::None;
         let path = self.path.clone();
+        let body_of_nary = std::mem::take(&mut self.nary_body);
+        let thin = if body_of_nary { differential(s) } else { None };
         for (i, n) in s.iter().enumerate() {
             if self.budget == 0 {
                 break;
             }
             self.cur = i;
+            self.thin_at = thin;
             self.node(n, st, depth, &mut prev, &mut parts, &mut marks);
         }
         // x of every part boundary, then of every caret unit.
@@ -617,12 +637,17 @@ impl Lay {
         let sz = self.size * st.factor();
         match n.bare() {
             Node::Text(t) => {
-                for c in t.chars() {
+                for (ci, c) in t.chars().enumerate() {
                     let before = parts.len();
+                    if self.thin_at == Some((me, ci)) {
+                        // The `d` of a trailing differential: a thin space after the integrand.
+                        parts.push(MathBox::space(3.0 / 18.0 * sz));
+                        *prev = Class::None;
+                    }
                     if c == '\u{2003}' || c == '\u{2002}' {
                         // A column break (cases): a fixed wide gap, and what follows starts afresh.
                         marks.push((before, before, 0.0));
-                        parts.push(MathBox::space(if c == '\u{2003}' { sz } else { sz * 0.5 }));
+                        parts.push(MathBox::space(if c == '\u{2003}' { sz * 1.3 } else { sz * 0.5 }));
                         *prev = Class::None;
                         continue;
                     }
@@ -745,14 +770,16 @@ impl Lay {
                     * if !display {
                         1.0
                     } else if integral {
-                        2.4
+                        2.9
                     } else {
                         1.75
                     };
                 let ob = self.big_op(*op, display, sz).unwrap_or_else(|| self.stretch(*op, opsz * 0.85, opsz));
                 let sb = sub.as_ref().map(|s| self.child(me, 0, s, st.script(), depth));
                 let sp = sup.as_ref().map(|s| self.child(me, usize::from(sub.is_some()), s, st.script(), depth));
+                self.nary_body = true;
                 let body_box = self.child(me, usize::from(sub.is_some()) + usize::from(sup.is_some()), body, st, depth);
+                self.nary_body = false;
                 let head = if integral || !display { self.scripts(ob, sb, sp, false, st) } else { self.limits(ob, sb, sp, sz) };
                 let mut parts = vec![head];
                 if body_box.w > 0.0 {
@@ -908,7 +935,11 @@ impl Lay {
         let mut out = MathBox::default();
         out.path(sign);
         if let Some(d) = deg {
-            out.put(d, kern_in * 0.5, -(total * 0.55));
+            // The degree sits in the notch above the hook: its baseline just clear of the tick's
+            // top, its right edge a little past the tick's end.
+            let dx = (c1.0 - d.w + 0.05 * sz).max(0.0);
+            let dy = hook_y - 0.12 * sz - d.desc;
+            out.put(d, dx, dy);
         }
         out.put(body, end_body, 0.0);
         out.w = end;
@@ -959,7 +990,7 @@ impl Lay {
                 out.put(sb, x, v);
             }
         }
-        out.w = width + 0.04 * sz;
+        out.w = width + 0.02 * sz;
         out
     }
 
@@ -988,7 +1019,7 @@ impl Lay {
     /// Summation and product signs drawn as shapes, heavy and square like a typeset display
     /// operator, centred on the math axis. `None` for other operators.
     fn big_op(&self, c: char, display: bool, sz: f64) -> Option<MathBox> {
-        let h = if display { 1.4 * sz } else { 0.95 * sz };
+        let h = if display { 1.7 * sz } else { 0.95 * sz };
         let top = -self.axis(sz) - h / 2.0;
         let mut p = BezPath::new();
         let pad = 0.05 * sz;
@@ -1116,8 +1147,10 @@ impl Lay {
         };
         let mut parts = vec![];
         if let Some(o) = make(open) {
+            // A brace with nothing closing it (cases) keeps the rows a clear distance away.
+            let gap = if open.trim() == "{" && close.trim().is_empty() { 0.3 } else { 0.02 };
             parts.push(o);
-            parts.push(MathBox::space(0.02 * sz));
+            parts.push(MathBox::space(gap * sz));
         }
         let n = items.len();
         for (i, b) in items.into_iter().enumerate() {
@@ -1273,6 +1306,8 @@ pub(crate) fn layout_math_wrapped(m: &Math, base: &FontFace, size: f64, bold: bo
         cur: 0,
         wrap: max_w,
         brks: vec![],
+        nary_body: false,
+        thin_at: None,
     };
     let st = if display { St::Display } else { St::Text };
     lay.seq(&m.body, st, 0)
@@ -1472,6 +1507,36 @@ mod tests {
         let b = lay("xy", false);
         assert!(b.w > 0.0 && b.asc > 0.0);
         assert!(b.glyph_items() >= 1);
+    }
+
+    #[test]
+    fn a_trailing_differential_takes_a_thin_space() {
+        let with = lay("\\int_0^1 xdx", true);
+        let without = lay("\\int_0^1 xex", true);
+        assert!(with.w > without.w + 0.1 * 20.0, "dx is set off from the integrand");
+        // Not an operator body: no space is added.
+        assert!((lay("xdx", false).w - lay("xex", false).w).abs() < 1.0);
+    }
+
+    #[test]
+    fn cfrac_is_a_fraction_and_cases_keep_a_gap_after_the_brace() {
+        let f = lay("1+\\cfrac{1}{x}", false);
+        assert!(f.rules() >= 1, "cfrac draws a bar");
+        let plain = lay("(x^2 & y)", false);
+        let cases = lay("\\begin{cases} x^2 & y \\\\ z & w \\end{cases}", false);
+        assert!(cases.w > plain.w + 0.5 * 20.0, "the brace and the columns are spaced");
+    }
+
+    #[test]
+    fn display_operators_are_large_and_the_root_degree_stays_by_the_hook() {
+        let d = lay("\\sum_{i=1}^n i", true);
+        let t = lay("\\sum_{i=1}^n i", false);
+        assert!(d.asc + d.desc > 1.5 * 20.0 * 1.6 / 1.4 * 0.9, "display sum is tall");
+        assert!(d.asc + d.desc > t.asc + t.desc);
+        let r = lay("\\sqrt[3]{x}", false);
+        let r0 = lay("\\sqrt{x}", false);
+        assert!(r.asc < r0.asc + 0.9 * 20.0, "the degree does not float far above the bar");
+        assert!(r.w > r0.w);
     }
 
     #[test]
