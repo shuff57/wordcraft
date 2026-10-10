@@ -4,6 +4,8 @@
 //! `r:id`, `a:blip`…), so the reader doesn't care which prefixes a producer chose. Names in
 //! unknown namespaces are kept in Clark form (`{uri}local`) so they can be written back.
 
+use std::collections::{HashMap, HashSet};
+
 use quick_xml::events::Event;
 use quick_xml::name::ResolveResult;
 use quick_xml::reader::NsReader;
@@ -14,6 +16,12 @@ use crate::DocxError;
 pub const MAX_DEPTH: usize = 256;
 /// Maximum number of elements in one part.
 pub const MAX_ELEMENTS: usize = 8_000_000;
+/// Maximum distinct foreign namespaces kept when re-serialising one subtree (`to_xml`).
+pub const MAX_XML_NAMESPACES: usize = 64;
+/// Maximum attributes written for one element by `to_xml`.
+pub const MAX_XML_ATTRS_PER_EL: usize = 256;
+/// Maximum attributes written for one whole subtree by `to_xml`.
+pub const MAX_XML_ATTRS_TOTAL: usize = 100_000;
 
 /// Known namespaces and the canonical prefix we use for them (read and write).
 pub const NAMESPACES: &[(&str, &str)] = &[
@@ -183,16 +191,18 @@ impl El {
         // Namespaces used by the subtree: known prefixes by table, unknown URIs get fresh `nsN`.
         let mut known: Vec<&'static str> = Vec::new();
         let mut unknown: Vec<String> = Vec::new();
+        let mut unknown_ix: HashMap<String, usize> = HashMap::new();
         fn uri_of(p: &str) -> Option<(&'static str, &'static str)> {
             NAMESPACES.iter().chain(OTHER_NAMESPACES).find(|(k, _)| *k == p).copied()
         }
-        fn collect(e: &El, known: &mut Vec<&'static str>, unknown: &mut Vec<String>, depth: usize) {
+        fn collect(e: &El, known: &mut Vec<&'static str>, unknown: &mut Vec<String>, unknown_ix: &mut HashMap<String, usize>, depth: usize) {
             if depth > MAX_DEPTH {
                 return;
             }
             for n in std::iter::once(e.name.as_str()).chain(e.attrs.iter().map(|(k, _)| k.as_str())) {
                 if let Some((u, _)) = clark(n) {
-                    if !unknown.iter().any(|x| x == u) {
+                    if unknown.len() < MAX_XML_NAMESPACES && !unknown_ix.contains_key(u) {
+                        unknown_ix.insert(u.to_string(), unknown.len());
                         unknown.push(u.to_string());
                     }
                 } else if let Some((p, _)) = n.split_once(':')
@@ -203,10 +213,10 @@ impl El {
                 }
             }
             for c in e.els() {
-                collect(c, known, unknown, depth + 1);
+                collect(c, known, unknown, unknown_ix, depth + 1);
             }
         }
-        collect(self, &mut known, &mut unknown, 0);
+        collect(self, &mut known, &mut unknown, &mut unknown_ix, 0);
         let mut decls = String::new();
         for p in &known {
             if *p == "xml" {
@@ -223,7 +233,7 @@ impl El {
         // only if it is a well-formed QName whose prefix is declared.
         let qname = |n: &str| -> Option<String> {
             if let Some((u, l)) = clark(n) {
-                let i = unknown.iter().position(|x| x == u)?;
+                let i = *unknown_ix.get(u)?;
                 return Some(format!("ns{}:{l}", i + 1));
             }
             if let Some((p, _)) = n.split_once(':')
@@ -234,23 +244,27 @@ impl El {
             }
             Some(n.to_string())
         };
-        fn go(e: &El, o: &mut String, decls: &str, depth: usize, q: &dyn Fn(&str) -> Option<String>) {
+        fn go(e: &El, o: &mut String, decls: &str, depth: usize, budget: &mut usize, q: &dyn Fn(&str) -> Option<String>) {
             let name = q(&e.name).unwrap_or_else(|| e.local().to_string());
             o.push('<');
             o.push_str(&name);
             o.push_str(decls);
-            let mut seen: Vec<String> = Vec::new();
+            let mut seen: HashSet<String> = HashSet::new();
             for (k, v) in &e.attrs {
+                if seen.len() >= MAX_XML_ATTRS_PER_EL || *budget == 0 {
+                    break;
+                }
                 let Some(k) = q(k) else { continue };
                 if seen.contains(&k) {
                     continue;
                 }
+                *budget -= 1;
                 o.push(' ');
                 o.push_str(&k);
                 o.push_str("=\"");
                 o.push_str(&esc(v));
                 o.push('"');
-                seen.push(k);
+                seen.insert(k);
             }
             if e.kids.is_empty() || depth > MAX_DEPTH {
                 o.push_str("/>");
@@ -260,7 +274,7 @@ impl El {
             for n in &e.kids {
                 match n {
                     Node::Text(t) => o.push_str(&esc(t)),
-                    Node::El(c) => go(c, o, "", depth + 1, q),
+                    Node::El(c) => go(c, o, "", depth + 1, budget, q),
                 }
             }
             o.push_str("</");
@@ -268,7 +282,8 @@ impl El {
             o.push('>');
         }
         let mut out = String::new();
-        go(self, &mut out, &decls, 0, &qname);
+        let mut budget = MAX_XML_ATTRS_TOTAL;
+        go(self, &mut out, &decls, 0, &mut budget, &qname);
         out
     }
     /// Local part of the name.
@@ -537,6 +552,38 @@ mod tests {
     #[test]
     fn escapes() {
         assert_eq!(esc("a<b&\"\u{1}"), "a&lt;b&amp;&quot;");
+    }
+
+    #[test]
+    fn to_xml_bounds_many_attributes_and_namespaces() {
+        let m = "http://schemas.openxmlformats.org/officeDocument/2006/math";
+        let mut x = format!("<m:oMath xmlns:m=\"{m}\"");
+        for i in 0..200_000 {
+            x.push_str(&format!(" a{i}=\"1\""));
+        }
+        x.push_str("/>");
+        let t = std::time::Instant::now();
+        let e = parse(x.as_bytes()).unwrap();
+        let out = e.to_xml();
+        assert!(t.elapsed().as_secs() < 10);
+        assert!(out.matches("=\"1\"").count() <= MAX_XML_ATTRS_PER_EL);
+        parse(out.as_bytes()).unwrap();
+
+        let mut x = format!("<m:oMath xmlns:m=\"{m}\"");
+        for i in 0..20_000 {
+            x.push_str(&format!(" xmlns:n{i}=\"urn:n{i}\""));
+        }
+        x.push('>');
+        for i in 0..20_000 {
+            x.push_str(&format!("<n{i}:x/>"));
+        }
+        x.push_str("</m:oMath>");
+        let t = std::time::Instant::now();
+        let e = parse(x.as_bytes()).unwrap();
+        let out = e.to_xml();
+        assert!(t.elapsed().as_secs() < 10);
+        assert!(out.matches("xmlns:ns").count() <= MAX_XML_NAMESPACES);
+        parse(out.as_bytes()).unwrap();
     }
 
     #[test]
