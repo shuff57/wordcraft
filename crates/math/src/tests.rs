@@ -1168,3 +1168,26 @@ fn cases_keep_their_column_break() {
         assert_eq!(from_omml(&to_omml(&m)), m);
     }
 }
+
+#[test]
+fn latex_nary_operand_takes_the_whole_product() {
+    use crate::linear::to_linear;
+    // The exponent belongs to the parenthesis, inside the sum's body.
+    let m = from_linear("\\sum_{i=1}^n (i+1)^2");
+    assert_eq!(m.body.len(), 1);
+    let Some(Node::Nary { body, .. }) = m.body.first() else { panic!("not an n-ary: {:?}", m.body) };
+    assert!(matches!(body.as_slice(), [Node::Script { sup: Some(_), .. }]), "{body:?}");
+    // Function application and the differential stay in the body; `\,` becomes a thin space.
+    let m = from_linear("\\int_a^b f(x)\\,dx = 1");
+    let Some(Node::Nary { body, .. }) = m.body.first() else { panic!("not an n-ary") };
+    assert!(matches!(body.last(), Some(Node::Text(t)) if t.ends_with("\u{2009}dx")), "{body:?}");
+    let m = from_linear("\\sum_{i=1}^n f(i) + 1");
+    assert_eq!(m.body.len(), 2, "{:?}", m.body);
+    let _ = to_linear(&m);
+    // Spacing commands survive as distinct characters.
+    assert_eq!(from_linear("a\\quad b").body, txt("a\u{2001}b"));
+    assert_eq!(from_linear(r"a\;b").body, txt("a\u{2004}b"));
+    // Never panics on junk.
+    let _ = from_linear(&"\\sum_".repeat(3000));
+    let _ = from_linear(&"\\int\\,".repeat(3000));
+}

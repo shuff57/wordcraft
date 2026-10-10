@@ -152,6 +152,9 @@ pub struct EqAtom {
     pub dx: f32,
     /// Display equation: alone on its line.
     pub display: bool,
+    /// An inline equation broken into several lines: it starts a line of its own, and the text
+    /// after it continues on its last line.
+    pub tall: bool,
 }
 
 impl std::fmt::Debug for EqAtom {
@@ -514,10 +517,13 @@ pub fn layout_para(p: &Paragraph, env: &ParaEnv) -> ParaLayout {
                                     _ => (adv - w) / 2.0,
                                 };
                                 (adv, dx)
+                            } else if let Some(lw) = bx.last_line_width() {
+                                ((lw as f32).clamp(0.0, w), 0.0)
                             } else {
                                 (w, 0.0)
                             };
-                            eqs.push(EqAtom { cluster: b.clusters.len(), bx: bx.clone(), dx, display: disp });
+                            let tall = !disp && bx.last_line_width().is_some();
+                            eqs.push(EqAtom { cluster: b.clusters.len(), bx: bx.clone(), dx, display: disp, tall });
                             push(&mut b, ClKind::Object(k), adv, (bx.ascent() as f32).clamp(1.0, 1e5));
                         }
                         Some(InlineObject::Opaque { text, .. }) => b.shape_atomic(text, start, end, &rc),
@@ -775,7 +781,9 @@ fn break_lines(pl: &mut ParaLayout, env: &ParaEnv, mark_style: u16, suffix: Opti
                     _ => false,
                 }
             });
-            let fits = absorbs || x + c.adv <= right_edge + 0.01 || c.kind == ClKind::Space || c.kind == ClKind::Marker;
+            // A broken-up inline equation starts its own line.
+            let tall_mid_line = j > c0 && x > line_start_x + 0.01 && pl.eq_at(j).is_some_and(|e| e.tall);
+            let fits = !tall_mid_line && (absorbs || x + c.adv <= right_edge + 0.01 || c.kind == ClKind::Space || c.kind == ClKind::Marker);
             if !fits && j > c0 {
                 // Wrap: back up to the last break opportunity on this line.
                 end = LineEnd::Wrap;

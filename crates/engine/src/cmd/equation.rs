@@ -386,6 +386,21 @@ mod tests {
     }
 
     #[test]
+    fn latex_big_operators_scope_their_whole_operand_and_keep_spacing() {
+        let mut s = session();
+        let r = s.run("equation.fromLinear", &json!({"linear": "\\sum_{i=1}^n (i+1)^2"})).unwrap();
+        let omml = r["omml"].as_str().unwrap();
+        // One n-ary whose body holds the squared parenthesis: the exponent is not on the sum.
+        assert_eq!(omml.matches("<m:nary>").count() + omml.matches("<m:nary ").count(), 1, "{omml}");
+        assert!(omml.contains("</m:sup><m:e><m:sSup>"), "{omml}");
+        assert!(r["warnings"].as_array().unwrap().is_empty());
+        let r = s.run("equation.fromLinear", &json!({"linear": "\\int_a^b f(x)\\,dx"})).unwrap();
+        assert!(r["omml"].as_str().unwrap().contains('\u{2009}'), "thin space kept");
+        let r = s.run("equation.fromLinear", &json!({"linear": "\\overset{def}{=} \\lVert x \\rVert \\mathbf{v}"})).unwrap();
+        assert!(r["warnings"].as_array().unwrap().is_empty(), "{r}");
+    }
+
+    #[test]
     fn unknown_commands_are_reported_and_cfrac_is_a_fraction() {
         let mut s = session();
         let r = s.run("equation.fromLinear", &json!({"linear": "1+\\cfrac{1}{x}+\\bogus y"})).unwrap();

@@ -55,6 +55,9 @@ pub struct MathBox {
     pub(crate) items: Vec<Item>,
     /// Caret geometry of every row laid out inside this box (box-local).
     pub(crate) geo: Vec<SeqGeo>,
+    /// Width of the last line when the equation was broken into several (inline equations then
+    /// sit with that line on the text baseline, so following text continues after it).
+    pub(crate) last_w: Option<f64>,
 }
 
 /// Where the caret positions of one row (a child sequence of the math tree) sit.
@@ -73,6 +76,10 @@ impl MathBox {
     /// Width, points.
     pub fn width(&self) -> f64 {
         self.w
+    }
+    /// Width of the last line of a broken-up inline equation; `None` for an equation on one line.
+    pub fn last_line_width(&self) -> Option<f64> {
+        self.last_w
     }
     /// Height above the baseline, points.
     pub fn ascent(&self) -> f64 {
@@ -222,6 +229,8 @@ enum Class {
     Bin,
     Rel,
     Punct,
+    /// A built-up fraction: it takes a thin space from its neighbours (outside scripts).
+    Inner,
 }
 
 /// Where a trailing differential (`dx`, `dt`...) starts in an operator's body: the last text
@@ -233,8 +242,25 @@ fn differential(s: &[Node]) -> Option<(usize, usize)> {
     let n = chars.len();
     let d = n.checked_sub(2)?;
     let (a, b) = (*chars.get(d)?, *chars.get(n - 1)?);
-    let before = d > 0 || i > 0;
-    (a == 'd' && b.is_alphabetic() && before && d.checked_sub(2).and_then(|k| chars.get(k)).is_none_or(|c| !c.is_alphabetic())).then_some((i, d))
+    let before = (d > 0 || i > 0) && d.checked_sub(1).and_then(|k| chars.get(k)).is_none_or(|c| space_em(*c).is_none());
+    (a == 'd'
+        && b.is_alphabetic()
+        && before
+        && (d.checked_sub(1).and_then(|k| chars.get(k)).is_none_or(|c| !c.is_alphabetic())
+            || d.checked_sub(2).and_then(|k| chars.get(k)).is_none_or(|c| !c.is_alphabetic())))
+    .then_some((i, d))
+}
+
+/// Width in em of the explicit space characters the typed-LaTeX parser produces: thin
+/// (`\,`), medium (`\:`), thick (`\;`) and one em (`\quad`).
+fn space_em(c: char) -> Option<f64> {
+    match c {
+        '\u{2009}' => Some(3.0 / 18.0),
+        '\u{2005}' => Some(4.0 / 18.0),
+        '\u{2004}' => Some(5.0 / 18.0),
+        '\u{2001}' => Some(1.0),
+        _ => None,
+    }
 }
 
 fn classify(c: char) -> Class {
@@ -269,6 +295,13 @@ fn gap(prev: Class, next: Class, script: bool) -> f64 {
             }
         }
         (Class::Op, _) | (_, Class::Op) => thin,
+        (Class::Inner, _) | (_, Class::Inner) => {
+            if script {
+                0.0
+            } else {
+                thin
+            }
+        }
         _ => 0.0,
     }
 }
@@ -433,7 +466,7 @@ impl Lay {
             let gap = match c {
                 '\u{2003}' => Some(1.0),
                 '\u{2002}' => Some(0.5),
-                _ => None,
+                c => space_em(c),
             };
             if let Some(g) = gap {
                 x += g * sz;
@@ -446,7 +479,7 @@ impl Lay {
             while j < chars.len() {
                 let d = chars.get(j).copied().unwrap_or(' ');
                 let dv = self.var_for(d, v);
-                if matches!(d, '\u{2003}' | '\u{2002}') || dv != cv || !Arc::ptr_eq(&self.pick(dv, d), &face) {
+                if matches!(d, '\u{2003}' | '\u{2002}') || space_em(d).is_some() || dv != cv || !Arc::ptr_eq(&self.pick(dv, d), &face) {
                     break;
                 }
                 j += 1;
@@ -566,7 +599,7 @@ impl Lay {
         let sz = self.size * st.factor();
         if self.path.is_empty() && depth == 0 && x > self.wrap {
             let brks = std::mem::take(&mut self.brks);
-            return self.wrapped(parts, &brks, sz);
+            return self.wrapped(parts, &brks, sz, st != St::Display);
         }
         let mut row = MathBox::row(parts);
         row.geo.push(SeqGeo { path, xs, top: (-row.asc).min(-0.72 * sz), bottom: row.desc.max(0.22 * sz) });
@@ -574,7 +607,7 @@ impl Lay {
     }
 
     /// The top-level `parts` broken into lines of at most `self.wrap` points, stacked left-aligned.
-    fn wrapped(&self, parts: Vec<MathBox>, brks: &[usize], sz: f64) -> MathBox {
+    fn wrapped(&self, parts: Vec<MathBox>, brks: &[usize], sz: f64, last_on_baseline: bool) -> MathBox {
         let max = self.wrap.max(4.0 * sz);
         // Choose where each line starts, by widths alone.
         let mut starts = vec![0usize];
@@ -611,16 +644,24 @@ impl Lay {
             }
             rows.push(MathBox::row(line));
         }
-        let mut out = MathBox::default();
-        let mut dy = 0.0;
-        let mut prev_desc = 0.0;
-        for (r, row) in rows.into_iter().enumerate() {
+        // Offset of each line's baseline from the first line's.
+        let mut offs = Vec::with_capacity(rows.len());
+        let (mut dy, mut prev_desc) = (0.0, 0.0);
+        for (r, row) in rows.iter().enumerate() {
             if r > 0 {
                 dy += prev_desc + row.asc + 0.25 * sz;
             }
             prev_desc = row.desc;
-            out.put(row, 0.0, dy);
+            offs.push(dy);
         }
+        // An inline equation puts its last line on the text baseline.
+        let lift = if last_on_baseline { dy } else { 0.0 };
+        let last_w = (last_on_baseline && rows.len() > 1).then(|| rows.last().map_or(0.0, |r| r.w));
+        let mut out = MathBox::default();
+        for (row, off) in rows.into_iter().zip(offs) {
+            out.put(row, 0.0, off - lift);
+        }
+        out.last_w = last_w;
         out
     }
 
@@ -651,6 +692,14 @@ impl Lay {
                         *prev = Class::None;
                         continue;
                     }
+                    if let Some(em) = space_em(c) {
+                        // `\,` `\:` `\;` `\quad`: a fixed space; it separates, so what follows
+                        // starts afresh.
+                        marks.push((before, before, 0.0));
+                        parts.push(MathBox::space(em * sz));
+                        *prev = Class::None;
+                        continue;
+                    }
                     if c.is_whitespace() {
                         marks.push((before, before, 0.0));
                         continue;
@@ -661,7 +710,10 @@ impl Lay {
                     }
                     self.push_gap(parts, *prev, k, st);
                     marks.push((before, parts.len(), 0.5));
-                    parts.push(self.text(&c.to_string(), Var::Italic, sz));
+                    match self.arrow(c, sz) {
+                        Some(a) => parts.push(a),
+                        None => parts.push(self.text(&c.to_string(), Var::Italic, sz)),
+                    }
                     if matches!(k, Class::Bin | Class::Rel) && self.path.is_empty() {
                         self.brks.push(parts.len());
                     }
@@ -707,14 +759,22 @@ impl Lay {
                     marks.push((parts.len(), parts.len(), 0.0));
                     return;
                 }
-                let k = if matches!(other, Node::Nary { .. } | Node::Limit { .. }) { Class::Op } else { Class::Ord };
+                let k = match other {
+                    Node::Nary { .. } | Node::Limit { .. } => Class::Op,
+                    Node::Frac { .. } => Class::Inner,
+                    _ => Class::Ord,
+                };
                 let before = parts.len();
                 self.push_gap(parts, *prev, k, st);
                 marks.push((before, parts.len(), 0.5));
                 let b = self.structure(other, st, depth + 1, me);
                 parts.push(b);
                 // `lim`, like `sin`, takes a thin space before what follows.
-                *prev = if matches!(other, Node::Limit { .. }) { Class::Op } else { Class::Ord };
+                *prev = match other {
+                    Node::Limit { .. } => Class::Op,
+                    Node::Frac { .. } => Class::Inner,
+                    _ => Class::Ord,
+                };
             }
         }
     }
@@ -780,7 +840,11 @@ impl Lay {
                 self.nary_body = true;
                 let body_box = self.child(me, usize::from(sub.is_some()) + usize::from(sup.is_some()), body, st, depth);
                 self.nary_body = false;
-                let head = if integral || !display { self.scripts(ob, sb, sp, false, st) } else { self.limits(ob, sb, sp, sz) };
+                let head = if integral || !display {
+                    self.scripts_tucked(ob, sb, sp, false, st, if integral && display { 0.14 } else { 0.0 })
+                } else {
+                    self.limits(ob, sb, sp, sz)
+                };
                 let mut parts = vec![head];
                 if body_box.w > 0.0 {
                     parts.push(MathBox::space(3.0 / 18.0 * sz));
@@ -885,7 +949,7 @@ impl Lay {
         let display = st == St::Display;
         // TeX keeps 3 rule widths between the bar and the nearest ink in every style, so a radical
         // or a nested fraction in a numerator / denominator never touches the bar.
-        let gap_min = if display { (3.5 * t).max(0.2 * sz) } else { (4.0 * t).max(0.24 * sz) };
+        let gap_min = if display { (3.0 * t).max(0.16 * sz) } else { (3.5 * t).max(0.2 * sz) };
         let num_shift = if display { 0.677 } else { 0.394 } * sz;
         let den_shift = if display { 0.686 } else { 0.345 } * sz;
         let up = num_shift.max(axis + t / 2.0 + gap_min + num.desc);
@@ -947,6 +1011,12 @@ impl Lay {
     }
 
     fn scripts(&self, base: MathBox, sub: Option<MathBox>, sup: Option<MathBox>, is_char: bool, st: St) -> MathBox {
+        self.scripts_tucked(base, sub, sup, is_char, st, 0.0)
+    }
+
+    /// [`scripts`](Self::scripts) with the scripts pulled `tuck` (a fraction of the base's height)
+    /// towards the base's middle: a tall slanted integral sign has its ink at the centre.
+    fn scripts_tucked(&self, base: MathBox, sub: Option<MathBox>, sup: Option<MathBox>, is_char: bool, st: St, tuck: f64) -> MathBox {
         let sz = self.size * st.factor();
         let ssz = sz * 0.7;
         let xh = self.x_height(sz);
@@ -957,8 +1027,8 @@ impl Lay {
         out.put(base, 0.0, 0.0);
         out.w = bw;
         let sup_min = if st == St::Display { 0.413 } else { 0.363 } * sz;
-        let mut u = if is_char { 0.0 } else { basc - 0.386 * ssz };
-        let mut v = if is_char { 0.0 } else { bdesc + 0.05 * ssz };
+        let mut u = if is_char { 0.0 } else { basc - 0.386 * ssz - tuck * basc };
+        let mut v = if is_char { 0.0 } else { bdesc + 0.05 * ssz - tuck * bdesc };
         let x = bw + 0.02 * sz;
         let mut width = bw;
         match (sub, sup) {
@@ -1018,6 +1088,29 @@ impl Lay {
 
     /// Summation and product signs drawn as shapes, heavy and square like a typeset display
     /// operator, centred on the math axis. `None` for other operators.
+    /// A right or left arrow drawn with a full-length shaft and a clear head (the text fonts'
+    /// own arrows are short and faint at script size).
+    fn arrow(&self, c: char, sz: f64) -> Option<MathBox> {
+        let dir = match c {
+            '\u{2192}' => 1.0,
+            '\u{2190}' => -1.0,
+            _ => return None,
+        };
+        let t = (self.hbar(sz) * 0.9).max(0.035 * sz);
+        let w = 0.95 * sz;
+        let y = -self.axis(sz);
+        let (tail, tip) = if dir > 0.0 { (0.04 * sz, w - 0.02 * sz) } else { (w - 0.04 * sz, 0.02 * sz) };
+        let head = 0.26 * sz;
+        let mut p = BezPath::new();
+        add_segment(&mut p, (tail, y), (tip - dir * t, y), t, false);
+        add_segment(&mut p, (tip, y), (tip - dir * head, y - 0.17 * sz), t, true);
+        add_segment(&mut p, (tip, y), (tip - dir * head, y + 0.17 * sz), t, true);
+        let mut b = MathBox::default();
+        b.path(p);
+        b.w = w;
+        Some(b)
+    }
+
     fn big_op(&self, c: char, display: bool, sz: f64) -> Option<MathBox> {
         let h = if display { 1.7 * sz } else { 0.95 * sz };
         let top = -self.axis(sz) - h / 2.0;
@@ -1228,7 +1321,7 @@ impl Lay {
             }
             row_h.push((a, d));
         }
-        let col_gap = 0.7 * sz;
+        let col_gap = 1.0 * sz;
         let row_gap = 0.2 * sz;
         let total: f64 = row_h.iter().map(|(a, d)| a + d).sum::<f64>() + row_gap * row_h.len().saturating_sub(1) as f64;
         let mut out = MathBox::default();
@@ -1792,5 +1885,48 @@ mod tests {
         let l = eq(&Math::new(vec![node]));
         assert!(l.rows() <= MAX_DEPTH + 2);
         let _ = l.hit(10.0, 10.0);
+    }
+
+    #[test]
+    fn explicit_spaces_have_their_widths() {
+        let plain = lay("ab", false).w;
+        let thin = lay(r"a\,b", false).w;
+        let quad = lay(r"a\quad b", false).w;
+        assert!(thin > plain + 1.0, "thin {thin} vs {plain}");
+        assert!(quad > thin + 8.0, "quad {quad} vs {thin}");
+    }
+
+    #[test]
+    fn a_fraction_takes_a_thin_space_from_what_follows() {
+        let f = lay("a/b", false).w;
+        let x = lay("x", false).w;
+        let both = lay("a/b x", false).w;
+        assert!(both > f + x + 1.0, "{both} vs {f}+{x}");
+    }
+
+    #[test]
+    fn a_differential_after_a_thin_space_is_not_spaced_twice() {
+        let one = lay(r"\int f\,dx", false).w;
+        let none = lay(r"\int f dx", false).w;
+        assert!((one - none).abs() < 1.0, "{one} vs {none}");
+    }
+
+    #[test]
+    fn arrows_are_drawn_full_length() {
+        let a = lay("x->0", false);
+        assert!(a.paths() >= 1, "arrow is a shape");
+        assert!(a.w > lay("x=0", false).w * 0.8);
+    }
+
+    #[test]
+    fn a_broken_inline_equation_reports_its_last_line() {
+        let m = from_linear(&"a+b+c+d+e+f+".repeat(8));
+        let b = layout_math_wrapped(&m, &face(), 20.0, false, false, 120.0);
+        let lw = b.last_line_width().expect("wrapped");
+        assert!(lw > 0.0 && lw <= b.w + 1e-9);
+        // The last line sits on the baseline: the lines above raise the box.
+        assert!(b.asc > 30.0);
+        let one = layout_math_wrapped(&m, &face(), 20.0, false, false, f64::INFINITY);
+        assert!(one.last_line_width().is_none());
     }
 }

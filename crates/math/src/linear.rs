@@ -498,7 +498,10 @@ impl Parser {
             self.pos += 1;
             match c {
                 '{' => self.escaped_brace(out),
-                ',' | ';' | ':' | ' ' => push_text(out, " "),
+                ',' => push_text(out, "\u{2009}"),
+                ':' => push_text(out, "\u{2005}"),
+                ';' => push_text(out, "\u{2004}"),
+                ' ' => push_text(out, " "),
                 '!' => {}
                 c => push_text(out, &c.to_string()),
             }
@@ -566,7 +569,25 @@ impl Parser {
                     _ => Node::Boxed { border: false, body },
                 });
             }
-            "left" | "right" | "big" | "Big" | "bigl" | "bigr" | "Bigl" | "Bigr" | "displaystyle" | "quad" | "qquad" => {}
+            "quad" | "qquad" => {
+                push_text(out, if w == "quad" { "\u{2001}" } else { "\u{2001}\u{2001}" });
+                self.skip_ws();
+            }
+            "lVert" | "rVert" | "Vert" => push_text(out, "\u{2016}"),
+            "lvert" | "rvert" | "vert" => push_text(out, "|"),
+            "overset" | "stackrel" | "underset" => {
+                let (a, b) = (self.brace_arg(), self.brace_arg());
+                out.push(Node::Limit { lower: w == "underset", base: b, lim: a });
+            }
+            "limits" | "nolimits" => {}
+            "left" | "right" | "big" | "Big" | "bigl" | "bigr" | "Bigl" | "Bigr" | "displaystyle" => {}
+            _ if NARY.iter().any(|(n, _)| *n == w) && self.depth < MAX_DEPTH => {
+                let op = NARY.iter().find(|(n, _)| *n == w).map(|(_, o)| *o).unwrap_or('∑');
+                self.depth += 1;
+                let n = self.nary_latex(op);
+                self.depth -= 1;
+                out.push(n);
+            }
             "text" | "textrm" | "mathrm" | "operatorname" | "mathbf" | "textbf" => {
                 let style = match w.as_str() {
                     "text" | "textrm" => Style::Normal,
@@ -999,6 +1020,101 @@ impl Parser {
             }
         }
         Node::Nary { op, sub, sup, body }
+    }
+
+    /// A LaTeX big operator (`\sum_{i=1}^n (i+1)^2`, `\int_a^b f(x)\,dx`): the scripts, then a
+    /// body that runs to the next relation, sign, comma or closing bracket at this level, so the
+    /// whole product belongs to the operator (LaTeX has no operand, so this is the reading a
+    /// person has in mind).
+    fn nary_latex(&mut self, op: char) -> Node {
+        let (mut sub, mut sup) = (None, None);
+        for _ in 0..2 {
+            self.skip_ws();
+            match self.peek() {
+                Some('_') if sub.is_none() => {
+                    self.pos += 1;
+                    sub = Some(self.atom(false));
+                }
+                Some('^') if sup.is_none() => {
+                    self.pos += 1;
+                    sup = Some(self.atom(false));
+                }
+                _ => break,
+            }
+        }
+        self.skip_ws();
+        let from = self.pos;
+        let end = self.latex_body_end(from);
+        let mut body = if end > from && self.depth < MAX_DEPTH { trim_seq(self.sub(from, end).seq()) } else { vec![] };
+        self.pos = end.max(from);
+        while body.first().is_some_and(|n| matches!(n, Node::Text(t) if t.trim().is_empty())) {
+            body.remove(0);
+        }
+        Node::Nary { op, sub, sup, body }
+    }
+
+    /// End (exclusive) of a LaTeX big operator's body that starts at `from`.
+    fn latex_body_end(&self, from: usize) -> usize {
+        const STOP: &[&str] = &[
+            "le",
+            "leq",
+            "ge",
+            "geq",
+            "ne",
+            "neq",
+            "approx",
+            "equiv",
+            "to",
+            "rightarrow",
+            "Rightarrow",
+            "leftrightarrow",
+            "Leftrightarrow",
+            "in",
+            "subset",
+            "subseteq",
+            "pm",
+            "mp",
+            "times",
+            "div",
+            "cdot",
+            "quad",
+            "qquad",
+            "end",
+            "right",
+            "sim",
+            "cong",
+            "propto",
+            "mid",
+        ];
+        let mut i = from;
+        let mut depth = 0usize;
+        while let Some(&ch) = self.c.get(i) {
+            match ch {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                '+' | '-' | '\u{2212}' | '=' | '<' | '>' | ',' | ';' | '&' if depth == 0 && i > from => break,
+                '\\' => match self.c.get(i + 1).copied() {
+                    Some('\\') if depth == 0 => break,
+                    Some(c) if c.is_ascii_alphabetic() => {
+                        let name: String = self.c.get(i + 1..).unwrap_or(&[]).iter().take_while(|c| c.is_ascii_alphabetic()).collect();
+                        if depth == 0 && STOP.contains(&name.as_str()) {
+                            break;
+                        }
+                        i += name.chars().count();
+                    }
+                    Some(_) => i += 1,
+                    None => {}
+                },
+                _ => {}
+            }
+            i += 1;
+        }
+        i.min(self.c.len())
     }
 
     fn matrix(&mut self) -> Option<Node> {
