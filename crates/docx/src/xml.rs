@@ -64,6 +64,13 @@ const STRICT: &[(&str, &str)] = &[
     ("m", "http://purl.oclc.org/ooxml/officeDocument/math"),
 ];
 
+/// Conservative XML NCName check (ASCII only): the lenient parser accepts names that strict
+/// consumers reject, so anything written back must pass this.
+fn is_ncname(s: &str) -> bool {
+    let mut it = s.chars();
+    matches!(it.next(), Some(c) if c.is_ascii_alphabetic() || c == '_') && it.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
 fn prefix_for(uri: &[u8]) -> Option<&'static str> {
     NAMESPACES.iter().chain(OTHER_NAMESPACES).chain(STRICT).find(|(_, u)| u.as_bytes() == uri).map(|(p, _)| *p)
 }
@@ -234,18 +241,31 @@ impl El {
         let qname = |n: &str| -> Option<String> {
             if let Some((u, l)) = clark(n) {
                 let i = *unknown_ix.get(u)?;
-                return Some(format!("ns{}:{l}", i + 1));
+                return is_ncname(l).then(|| format!("ns{}:{l}", i + 1));
             }
-            if let Some((p, _)) = n.split_once(':')
-                && p != "xml"
-                && !known.contains(&p)
-            {
-                return None;
+            match n.split_once(':') {
+                Some((p, l)) => (is_ncname(p) && is_ncname(l) && (p == "xml" || known.contains(&p))).then(|| n.to_string()),
+                None => is_ncname(n).then(|| n.to_string()),
             }
-            Some(n.to_string())
         };
         fn go(e: &El, o: &mut String, decls: &str, depth: usize, budget: &mut usize, q: &dyn Fn(&str) -> Option<String>) {
-            let name = q(&e.name).unwrap_or_else(|| e.local().to_string());
+            let name = match q(&e.name) {
+                Some(n) => n,
+                None => {
+                    if depth == 0 {
+                        "x".to_string()
+                    } else {
+                        // No valid qualified name: drop the wrapper, keep the content.
+                        for n in &e.kids {
+                            match n {
+                                Node::Text(t) => o.push_str(&esc(t)),
+                                Node::El(c) => go(c, o, "", depth + 1, budget, q),
+                            }
+                        }
+                        return;
+                    }
+                }
+            };
             o.push('<');
             o.push_str(&name);
             o.push_str(decls);
@@ -598,5 +618,30 @@ mod tests {
         assert_eq!(again.find("{urn:p}ext").map(|e| e.local()), Some("ext"));
         // val attributes stay distinct
         assert_eq!(out.matches("val=").count(), 2);
+    }
+
+    #[test]
+    fn to_xml_drops_invalid_names() {
+        let bad_el = ["1x", "a:b", "a=b", "r<x", "", "a b", "é"];
+        for n in bad_el {
+            let e = El {
+                name: "m:oMath".into(),
+                attrs: vec![],
+                kids: vec![Node::El(El { name: format!("m:{n}"), attrs: vec![], kids: vec![Node::Text("q".into())] })],
+            };
+            let out = e.to_xml();
+            assert!(n.is_empty() || !out.contains(&format!("<m:{n}")), "{out}");
+            let back = parse(out.as_bytes()).unwrap();
+            assert_eq!(back.deep_text(), "q", "{out}");
+        }
+        for k in ["m:9x", "m:a<b", "m:e&f", "9x", "a<b", "e&f", "m:a:b", "{urn:z}9x"] {
+            let e = El { name: "m:r".into(), attrs: vec![(k.into(), "3".into()), ("m:val".into(), "ok".into())], kids: vec![] };
+            let out = e.to_xml();
+            assert!(!out.contains("=\"3\""), "{k}: {out}");
+            assert!(out.contains("m:val=\"ok\""), "{out}");
+        }
+        // Invalid root name falls back to something well-formed.
+        let e = El { name: "m:1x".into(), attrs: vec![], kids: vec![] };
+        assert!(parse(e.to_xml().as_bytes()).is_ok());
     }
 }

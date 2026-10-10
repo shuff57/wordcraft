@@ -870,9 +870,18 @@ fn assert_well_formed(xml: &str) {
         let (res, ev) = r.read_resolved_event().unwrap_or_else(|e| panic!("not well-formed: {e}\n{xml}"));
         match ev {
             Event::Start(ref e) | Event::Empty(ref e) => {
+                let ok = |n: &[u8]| {
+                    n.split(|b| *b == b':').count() <= 2
+                        && n.split(|b| *b == b':').all(|p| {
+                            p.first().is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+                                && p.iter().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.'))
+                        })
+                };
+                assert!(ok(e.name().as_ref()), "bad element name in {xml}");
                 assert!(!matches!(res, ResolveResult::Unbound | ResolveResult::Unknown(_)), "unbound element prefix in {xml}");
                 for a in e.attributes() {
                     let a = a.unwrap_or_else(|e| panic!("bad attribute: {e}\n{xml}"));
+                    assert!(a.key.as_ref().starts_with(b"xmlns") || ok(a.key.as_ref()), "bad attribute name in {xml}");
                     let (ar, _) = r.resolve_attribute(a.key);
                     assert!(!matches!(ar, ResolveResult::Unknown(_)), "unbound attribute prefix in {xml}");
                 }
@@ -931,6 +940,8 @@ fn hostile_omml_never_corrupts_document_xml() {
         "\u{0}<m:oMath/>".to_string(),
         format!("<m:oMath xmlns:m=\"{m}\" a=\"1\" a=\"2\"/>"),
         format!("<m:oMath xmlns:m=\"{m}\" bad:attr=\"1\"/>"),
+        format!("<m:oMath xmlns:m=\"{m}\"><m:1x/><m:a:b/><m:a=b/><m:r<x>q</m:r<x></m:oMath>"),
+        format!("<m:oMath xmlns:m=\"{m}\"><m:r 9x=\"3\" a<b=\"1\" e&amp;f=\"4\" m:val=\"ok\"><m:t>q</m:t></m:r></m:oMath>"),
         format!("<m:oMath xmlns:m=\"{m}\" xmlns:p=\"urn:a}}b\"><p:ext p:k=\"1\"/></m:oMath>"),
         format!("<m:oMath xmlns:m=\"{m}\" xmlns:p=\"urn:}}{{x&lt;&quot;\"><p:ext p:k=\"1\"/></m:oMath>"),
     ];
