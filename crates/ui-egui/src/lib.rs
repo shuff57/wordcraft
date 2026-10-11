@@ -351,6 +351,14 @@ impl WordApp {
         }
     }
 
+    /// Another app has replaced the shared egui fonts and visuals (OfficeCraft hosts several in
+    /// one window): install this app's again before it draws its next frame.
+    pub fn context_changed(&mut self) {
+        self.styled = false;
+        self.applied_dark = None;
+        self.fonts_frames = 0;
+    }
+
     /// Per-frame logic before layout: control requests, screenshots, shortcuts, file drops.
     pub fn logic(&mut self, ctx: &egui::Context) {
         let lang = i18n::Lang::from_pref(&self.ui.language);
