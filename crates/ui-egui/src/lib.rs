@@ -341,6 +341,17 @@ fn migrate_units(v: &mut Value) {
     }
 }
 
+impl WordApp {
+    /// Set when a picture was double-clicked: returns the encoded bytes of that (now selected)
+    /// picture once, so the host can open it in its own editor and later `picture.replaceImage`.
+    pub fn take_picture_edit(&mut self) -> Option<std::sync::Arc<Vec<u8>>> {
+        if !std::mem::take(&mut self.canvas.picture_edit) {
+            return None;
+        }
+        wordcraft_engine::cmd::objects::selected_picture_bytes(&self.session)
+    }
+}
+
 /// The application.
 pub struct WordApp {
     pub session: Session,

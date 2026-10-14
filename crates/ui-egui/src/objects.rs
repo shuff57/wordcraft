@@ -189,6 +189,15 @@ pub fn pointer(app: &mut WordApp, ui: &Ui, resp: &egui::Response, pages: &[Rect]
         let _ = app.run("select.addObject", json!({"pos": object.pos()}));
         return true;
     }
+    if resp.double_clicked() && grab == Grab::Move {
+        let pos = object.pos();
+        let end = Pos { off: pos.off + OBJ.len_utf8(), ..pos.clone() };
+        let _ = app.run("select.range", json!({"anchor": pos, "focus": end}));
+        if matches!(selected(app), Some((_, InlineObject::Image { .. }))) {
+            app.canvas.picture_edit = true;
+            return true;
+        }
+    }
     if pressed {
         let pos = object.pos();
         let end = Pos { off: pos.off + OBJ.len_utf8(), ..pos.clone() };

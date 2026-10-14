@@ -134,6 +134,8 @@ pub struct CanvasState {
     pub(crate) swallow_text: bool,
     /// Create Link is waiting for a click on the text box to link to: the linking box's object.
     pub(crate) link_from: Option<wordcraft_doc::Pos>,
+    /// A picture was double-clicked: the host may open it in a better editor (see `take_picture_edit`).
+    pub picture_edit: bool,
     /// What screen readers were last told about the document (#488).
     pub(crate) a11y: crate::a11y::A11yCache,
     /// A press on a table's selection area or move handle, held (`table_mouse`).
@@ -212,6 +214,7 @@ impl Default for CanvasState {
             table_stroke: None,
             table_resize: None,
             link_from: None,
+            picture_edit: false,
             a11y: Default::default(),
             table_drag: None,
         }
