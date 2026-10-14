@@ -134,6 +134,21 @@ fn screen(pages: &[Rect], scale: f32, page: usize, r: wordcraft_geom::Rect) -> O
 /// Pressing, dragging, releasing or double-clicking on an object (or a frame handle). Returns
 /// true when it was about an object, so the text doesn't also get it.
 pub fn pointer(app: &mut WordApp, ui: &Ui, resp: &egui::Response, pages: &[Rect], layout: &DocLayout, scale: f32, at: Pos2) -> bool {
+    // A double-click on a picture is for the host (open it in its own editor). It is checked first:
+    // the second press has already started a drag, which would otherwise take the release.
+    if resp.double_clicked()
+        && let Some((object, Grab::Move)) = grab_at(app, layout, pages, scale, at)
+    {
+        let pos = object.pos();
+        let is_picture = matches!(app.session.doc.para_at(&pos).and_then(|p| p.object_at(pos.off)), Some(InlineObject::Image { .. }));
+        if is_picture {
+            app.canvas.obj_drag = None;
+            let end = Pos { off: pos.off + OBJ.len_utf8(), ..pos.clone() };
+            let _ = app.run("select.range", json!({"anchor": pos, "focus": end}));
+            app.canvas.picture_edit = true;
+            return true;
+        }
+    }
     if let Some(mut d) = app.canvas.obj_drag.take() {
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             return true; // cancelled: dropped without a change
@@ -188,15 +203,6 @@ pub fn pointer(app: &mut WordApp, ui: &Ui, resp: &egui::Response, pages: &[Rect]
     if pressed && adding && grab == Grab::Move && selected(app).is_some() {
         let _ = app.run("select.addObject", json!({"pos": object.pos()}));
         return true;
-    }
-    if resp.double_clicked() && grab == Grab::Move {
-        let pos = object.pos();
-        let end = Pos { off: pos.off + OBJ.len_utf8(), ..pos.clone() };
-        let _ = app.run("select.range", json!({"anchor": pos, "focus": end}));
-        if matches!(selected(app), Some((_, InlineObject::Image { .. }))) {
-            app.canvas.picture_edit = true;
-            return true;
-        }
     }
     if pressed {
         let pos = object.pos();
